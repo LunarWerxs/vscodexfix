@@ -4,7 +4,7 @@
 
 The stock ChatGPT / Codex VS Code extension buries every task behind a tiny `View all` flyout, hides recent-chat search, and won't let you rename, pin, or star anything from the sidebar. This fixes all of that — and groups your tasks by workspace while it's at it.
 
-> Current release: **v0.2.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
+> Current release: **v0.3.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
 
 ---
 
@@ -102,6 +102,8 @@ The full feature spec sent to the Codex team lives in [CODEX_EXTENSION_FEEDBACK.
 ---
 
 ## Changelog
+
+**v0.3.0** — Dynamic patcher refresh for newer Codex bundles. Restores task-row context injection so right-click rename / pin / star receive the actual task id again, adds cache-busting for patched webview assets, and hardens the minified-anchor matching used by the sidebar, workspace grouping, recent-search menu, and sticky composer patches.
 
 **v0.2.0** — Default flow is now download-latest-from-Marketplace → patch → auto-install via `code --install-extension --force`. No more "I patched the wrong installed version" footgun (VS Code can have multiple versions of an extension side-by-side and only loads the highest). Pass `--vsix-only` to opt out of auto-install. The old `--install` flag is kept as a deprecated alias.
 

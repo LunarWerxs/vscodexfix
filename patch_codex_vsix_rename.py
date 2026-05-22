@@ -6,6 +6,7 @@ task actions (rename / pin / star), an inline expanded task list, workspace
 grouping with collapsible headers, a Search Chats entry in the profile menu,
 a sticky composer, and horizontal-overflow fixes. See README.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,13 +23,17 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 COMMAND_ID = "chatgpt.renameTask"
 PIN_COMMAND_ID = "chatgpt.pinTask"
+UNPIN_COMMAND_ID = "chatgpt.unpinTask"
 STAR_COMMAND_ID = "chatgpt.starTask"
+UNSTAR_COMMAND_ID = "chatgpt.unstarTask"
 DEFAULT_MARKETPLACE_ITEM = "openai.chatgpt"
-MARKETPLACE_QUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
+MARKETPLACE_QUERY_URL = (
+    "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
+)
 PATCH_RENAME = "rename"
 PATCH_RECENT_MENU = "recent-menu"
 PATCH_WORKSPACE_GROUPS = "workspace-groups"
@@ -71,8 +76,7 @@ def check_python_dependencies(path: Path) -> None:
     if missing:
         packages = " ".join(sorted(missing))
         raise RuntimeError(
-            "Missing Python package(s): "
-            f"{packages}\nInstall them with: python -m pip install {packages}"
+            "Missing Python package(s): " f"{packages}\nInstall them with: python -m pip install {packages}"
         )
     log(f"Python dependency check passed ({len(py_files)} file(s) scanned)")
 
@@ -83,6 +87,20 @@ def read(path: Path) -> str:
 
 def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Minified-anchor utilities
+#
+# The Codex extension bundle is minified with single/short letter identifiers
+# that change every release. Rather than hard-coding those identifiers, we
+# anchor patches on the strings that DON'T change between releases (literal
+# message ids, CSS class names, VS Code API method names) and capture the
+# minified identifiers via regex named groups when we need them.
+# ---------------------------------------------------------------------------
+
+# Pattern fragment for a minified JS identifier (e.g. `e`, `Nee`, `_Ye`).
+JS_ID = r"[A-Za-z_$][\w$]*"
 
 
 def marketplace_item_from_target(target: str) -> str | None:
@@ -141,7 +159,9 @@ def patch_package_json(package_json: Path) -> bool:
     for command_id, title, icon in (
         (COMMAND_ID, "Rename Task", "$(edit)"),
         (PIN_COMMAND_ID, "Pin Task", "$(pinned)"),
+        (UNPIN_COMMAND_ID, "Unpin Task", "$(pinned-dirty)"),
         (STAR_COMMAND_ID, "Star Task", "$(star-full)"),
+        (UNSTAR_COMMAND_ID, "Unstar Task", "$(star-empty)"),
     ):
         if not any(command.get("command") == command_id for command in commands):
             commands.append({"command": command_id, "title": title, "category": "Codex", "icon": icon})
@@ -149,15 +169,21 @@ def patch_package_json(package_json: Path) -> bool:
 
     menus = contributes.setdefault("menus", {})
     webview_context_menu = menus.setdefault("webview/context", [])
-    webview_when = "(webviewId == 'chatgpt.sidebarView' || webviewId == 'chatgpt.sidebarSecondaryView') && webviewSection == 'codex-task'"
-    for command_id, group in ((COMMAND_ID, "navigation@1"), (PIN_COMMAND_ID, "navigation@2"), (STAR_COMMAND_ID, "navigation@3")):
+    webview_when = "(webviewId == 'chatgpt.sidebarView' || webviewId == 'chatgpt.sidebarSecondaryView') && codexTask == true"
+    for command_id, group, when in (
+        (COMMAND_ID, "navigation@1", webview_when),
+        (PIN_COMMAND_ID, "navigation@2", f"{webview_when} && !codexPinned"),
+        (UNPIN_COMMAND_ID, "navigation@2", f"{webview_when} && codexPinned == true"),
+        (STAR_COMMAND_ID, "navigation@3", f"{webview_when} && !codexStarred"),
+        (UNSTAR_COMMAND_ID, "navigation@3", f"{webview_when} && codexStarred == true"),
+    ):
         webview_item = next((item for item in webview_context_menu if item.get("command") == command_id), None)
         if webview_item is None:
-            webview_context_menu.insert(0, {"command": command_id, "group": group, "when": webview_when})
+            webview_context_menu.insert(0, {"command": command_id, "group": group, "when": when})
             changed = True
         else:
-            if webview_item.get("when") != webview_when:
-                webview_item["when"] = webview_when
+            if webview_item.get("when") != when:
+                webview_item["when"] = when
                 changed = True
             if webview_item.get("group") != group:
                 webview_item["group"] = group
@@ -180,89 +206,330 @@ def patch_package_json(package_json: Path) -> bool:
 
 
 RENAME_HELPER_JS = r"""
-function codexRenameThreadId(t){if(t&&typeof t.id=="string")return t.id;if(t&&typeof t.codexThreadId=="string")return t.codexThreadId;if(t&&typeof t["data-codex-thread-id"]=="string")return t["data-codex-thread-id"];if(t&&t.resource){let e=typeof t.resource.toString=="function"?t.resource.toString():String(t.resource),r=/\/local\/([^/?#]+)/.exec(e);if(r)return decodeURIComponent(r[1])}return null}
-function codexRenameThreadTitle(t){return typeof t?.label=="string"?t.label:typeof t?.codexThreadTitle=="string"?t.codexThreadTitle:typeof t?.["data-codex-thread-title"]=="string"?t["data-codex-thread-title"]:""}
-async function codexSetTaskTitle(t,e,r,n,o){let i=codexRenameThreadId(t);if(!i){e.window.showErrorMessage("Right-click a Codex task row first.");return!1}if(typeof r!="function")throw new Error("Codex app-server rename route is unavailable");await r(i,n),o&&e.window.showInformationMessage(o);return!0}
-async function codexRenameTask(t,e,r){let n=codexRenameThreadId(t);if(!n){e.window.showErrorMessage("Right-click a Codex task row to rename it.");return!1}let o=codexRenameThreadTitle(t),i=await e.window.showInputBox({title:"Rename Codex Task",prompt:"Enter a new task name",value:o,ignoreFocusOut:!0,validateInput:s=>s.trim().length===0?"Task name cannot be empty":void 0});if(i==null)return!1;let a=i.replace(/\s+/g," ").trim();return!a||a===o?!1:codexSetTaskTitle(t,e,r,a,"Codex task renamed.")}
-async function codexStarTask(t,e,r){let n=codexRenameThreadTitle(t).trim();return n.startsWith("⭐ ")?!1:codexSetTaskTitle(t,e,r,`⭐ ${n}`,"Codex task starred.")}
-async function codexPinTask(t,e,r){let n=codexRenameThreadTitle(t).trim(),o=n.startsWith("⭐ "),i=o?n.slice(2).trimStart():n,a;i.startsWith("📌 ")?a=(o?"⭐ ":"")+i.slice(2).trimStart():a=(o?"⭐ 📌 ":"📌 ")+i;return a===n?!1:codexSetTaskTitle(t,e,r,a,"Codex task pin toggled.")}
+var codexLastTaskContext=null;
+var codexTaskContextResolvers=new Map,codexTaskContextRequestSeq=0;
+function codexRememberTaskContext(t){if(t&&typeof t.codexThreadId=="string"&&t.codexThreadId)codexLastTaskContext={codexThreadId:t.codexThreadId,codexThreadTitle:typeof t.codexThreadTitle=="string"?t.codexThreadTitle:"",__ts:Date.now()}}
+function codexResolveTaskContext(t){codexRememberTaskContext(t);let e=t&&t.requestId!=null?String(t.requestId):null;if(e){let r=codexTaskContextResolvers.get(e);r&&(codexTaskContextResolvers.delete(e),r(codexRecentTaskContext()))}}
+function codexRecentTaskContext(){return codexLastTaskContext&&Date.now()-codexLastTaskContext.__ts<6e4?codexLastTaskContext:null}
+function codexDelay(t){return new Promise(e=>setTimeout(e,t))}
+async function codexRequestTaskContext(t){try{let e=t?.sidebarView?.webview;if(!e||typeof t.postMessageToWebview!="function")return codexRecentTaskContext();let r=String(++codexTaskContextRequestSeq),n=new Promise(o=>{codexTaskContextResolvers.set(r,o),setTimeout(()=>{codexTaskContextResolvers.has(r)&&(codexTaskContextResolvers.delete(r),o(codexRecentTaskContext()))},500)});return t.postMessageToWebview(e,{type:"codex-request-task-context",requestId:r}),await n}catch{return codexRecentTaskContext()}}
+async function codexWithTaskContext(t,e){if(codexRenameThreadIdDirect(t)&&codexRenameThreadTitleDirect(t))return t;let r=(await codexRequestTaskContext(e))??codexRecentTaskContext();return r?{...t,...r}:t}
+function codexRenameThreadIdDirect(t){if(t&&typeof t.id=="string")return t.id;if(t&&typeof t.codexThreadId=="string")return t.codexThreadId;if(t&&typeof t["data-codex-thread-id"]=="string")return t["data-codex-thread-id"];if(t&&t.resource){let e=typeof t.resource.toString=="function"?t.resource.toString():String(t.resource),r=/\/local\/([^/?#]+)/.exec(e);if(r)return decodeURIComponent(r[1])}return null}
+function codexRenameThreadId(t){let e=codexRenameThreadIdDirect(t);return e??codexRenameThreadIdDirect(codexRecentTaskContext())}
+function codexRenameThreadTitleDirect(t){return typeof t?.label=="string"?t.label:typeof t?.codexThreadTitle=="string"?t.codexThreadTitle:typeof t?.["data-codex-thread-title"]=="string"?t["data-codex-thread-title"]:""}
+function codexRenameThreadTitle(t){let e=codexRenameThreadTitleDirect(t);return e||codexRenameThreadTitleDirect(codexRecentTaskContext())}
+async function codexEnsureTaskContext(t){let e=codexRenameThreadId(t);if(e)return t;await codexDelay(250);return codexRenameThreadId(t)?t:codexRecentTaskContext()}
+async function codexSetTaskTitle(t,e,r,n,o){let i=await codexEnsureTaskContext(t),a=codexRenameThreadId(i);if(!a){e.window.showErrorMessage("Right-click a Codex task row first.");return!1}if(typeof r!="function")throw new Error("Codex app-server rename route is unavailable");await r(a,n),o&&e.window.showInformationMessage(o);return!0}
+async function codexRenameTask(t,e,r){let n=await codexEnsureTaskContext(t),o=codexRenameThreadId(n);if(!o){e.window.showErrorMessage("Right-click a Codex task row to rename it.");return!1}let i=codexRenameThreadTitle(n),a=await e.window.showInputBox({title:"Rename Codex Task",prompt:"Enter a new task name",value:i,ignoreFocusOut:!0,validateInput:s=>s.trim().length===0?"Task name cannot be empty":void 0});if(a==null)return!1;let c=a.replace(/\s+/g," ").trim();return!c||c===i?!1:codexSetTaskTitle(n,e,r,c,"Codex task renamed.")}
+async function codexStarTask(t,e,r){let n=await codexEnsureTaskContext(t),o=codexRenameThreadTitle(n).trim();if(!o){e.window.showErrorMessage("Could not read Codex task title.");return!1}let i=o.startsWith("⭐ "),a=i?o.slice(2).trimStart():`⭐ ${o}`;return a===o?!1:codexSetTaskTitle(n,e,r,a,i?"Codex task unstarred.":"Codex task starred.")}
+async function codexPinTask(t,e,r){let n=await codexEnsureTaskContext(t),o=codexRenameThreadTitle(n).trim();if(!o){e.window.showErrorMessage("Could not read Codex task title.");return!1}let i=o.startsWith("⭐ "),a=i?o.slice(2).trimStart():o,c,d;if(a.startsWith("📌 "))c=a.slice(2).trimStart(),d=i?`⭐ ${c}`:c;else d=i?`⭐ 📌 ${a}`:`📌 ${a}`;return d===o?!1:codexSetTaskTitle(n,e,r,d,a.startsWith("📌 ")?"Codex task unpinned.":"Codex task pinned.")}
 """
 
 OLD_RENAME_HELPER_START = 'var codexRenameFs=require("fs"),codexRenameCp=require("child_process"),codexRenameOs=require("os"),codexRenamePath=require("path");'
 
 
+def _strip_existing_rename_helpers(text: str) -> tuple[str, bool]:
+    """Remove any previously-injected rename helpers so we can re-inject cleanly.
+
+    Returns (new_text, changed).
+    """
+    changed = False
+
+    # Old-style fs/cp helpers run an external process. If they're present, drop
+    # them entirely so the modern helper takes over.
+    if OLD_RENAME_HELPER_START in text:
+        start = text.index(OLD_RENAME_HELPER_START)
+        # Strip up to but not including the next "var " or "function " that
+        # isn't part of the helpers. The current helpers' last function is
+        # codexPinTask, so look for the end of its body — that's a `}` followed
+        # by `var ` or `function ` at top level. Pragmatic heuristic: find the
+        # provider-decl anchor and cut up to there.
+        m = re.search(rf'var\s+{JS_ID}="codex\.chatSessionProvider"', text)
+        if m:
+            text = text[:start] + text[m.start() :]
+            changed = True
+
+    # Strip any previous codex* helper block so we re-inject from scratch.
+    m_first = re.search(
+        r"(?:var codexLastTaskContext=null;|function codexRememberTaskContext\(|function codexRename(?:ThreadId|ThreadTitle)(?:Direct)?\()",
+        text,
+    )
+    if m_first:
+        m_last = None
+        for name in ("codexPinTask", "codexStarTask", "codexRenameTask", "codexSetTaskTitle"):
+            for m in re.finditer(rf"function\s+{name}\([^)]*\)\{{", text):
+                m_last = m
+        if m_last:
+            # Find the matching closing brace of m_last's function body
+            depth = 0
+            i = m_last.end() - 1  # at the '{'
+            end_idx = -1
+            while i < len(text):
+                c = text[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i + 1
+                        break
+                i += 1
+            if end_idx != -1:
+                text = text[: m_first.start()] + text[end_idx:]
+                changed = True
+
+    return text, changed
+
+
 def patch_extension_js(extension_js: Path) -> bool:
     text = read(extension_js)
     changed = False
-    anchor = 'var Nee="codex.chatSessionProvider",QFe="codex.chatSessionObserver",f0="Codex Agent",Dee=80;'
 
-    if OLD_RENAME_HELPER_START in text:
-        start = text.index(OLD_RENAME_HELPER_START)
-        end = text.find(anchor, start)
-        if end == -1:
-            raise RuntimeError("Could not find chat session provider anchor after old rename helper")
-        text = text[:start] + RENAME_HELPER_JS + text[end:]
-        changed = True
-    elif "function codexStarTask(" not in text and "function codexRenameThreadId(" in text:
-        start = text.index("function codexRenameThreadId(")
-        end = text.find(anchor, start)
-        if end == -1:
-            raise RuntimeError("Could not find chat session provider anchor after rename helper")
-        text = text[:start] + RENAME_HELPER_JS + text[end:]
-        changed = True
-    elif "function codexRenameTask(" not in text:
-        if anchor not in text:
-            raise RuntimeError("Could not find chat session provider anchor in extension.js")
-        text = text.replace(anchor, RENAME_HELPER_JS + anchor, 1)
+    # ------------------------------------------------------------------
+    # 1) Discover the minified identifiers we need.
+    # ------------------------------------------------------------------
+    m_provider = re.search(
+        rf'var\s+(?P<provider>{JS_ID})="codex\.chatSessionProvider",\s*'
+        rf'(?P<observer>{JS_ID})="codex\.chatSessionObserver",\s*'
+        rf'(?P<agent>{JS_ID})="Codex Agent",\s*'
+        rf"(?P<truncate>{JS_ID})=\d+;",
+        text,
+    )
+    if m_provider is None:
+        raise RuntimeError("Could not find codex.chatSessionProvider declaration in extension.js")
+    provider_id = m_provider.group("provider")
+
+    # The vscode-namespace alias used inside the chat-session class. We grab it
+    # from the trackTabIfNeeded method, which destructures TabInputCustom.
+    m_track = re.search(
+        rf"async\s+trackTabIfNeeded\(e\)\{{let r=e\.input;if\(!\(r instanceof\s+(?P<ns>{JS_ID})\.TabInputCustom\)\)return;",
+        text,
+    )
+    if m_track is None:
+        raise RuntimeError("Could not find trackTabIfNeeded anchor in extension.js")
+    vscode_ns = m_track.group("ns")
+
+    m_webview_provider = re.search(rf"let\s+(?P<provider>{JS_ID})=new\s+ml\(", text)
+    if m_webview_provider is None:
+        raise RuntimeError("Could not find Codex webview provider variable in extension.js")
+    webview_provider_var = m_webview_provider.group("provider")
+
+    # ------------------------------------------------------------------
+    # 2) Inject codex* helper functions just before the chatSessionProvider
+    #    declaration (drop any previous versions first).
+    #
+    # If the file already contains the canonical helper block verbatim, we
+    # skip the strip/re-inject cycle so the patch is a no-op.
+    # ------------------------------------------------------------------
+    if RENAME_HELPER_JS.strip() not in text:
+        text, stripped = _strip_existing_rename_helpers(text)
+        if stripped:
+            changed = True
+
+    if "function codexRenameTask(" not in text:
+        # Re-locate the anchor in case the strip changed offsets.
+        m_provider = re.search(
+            rf'var\s+{JS_ID}="codex\.chatSessionProvider"',
+            text,
+        )
+        if m_provider is None:
+            raise RuntimeError("Lost codex.chatSessionProvider anchor while injecting helpers")
+        insert_at = m_provider.start()
+        text = text[:insert_at] + RENAME_HELPER_JS + text[insert_at:]
         changed = True
 
-    old_method = "async trackTabIfNeeded(e){let r=e.input;if(!(r instanceof ll.TabInputCustom))return;"
-    old_rename_method = "async renameChatSessionItem(e){let r=await codexRenameTask(e,ll);return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),this.onDidChangeChatSessionItemsEmitter.fire()),r}"
-    current_rename_method = "async renameChatSessionItem(e){let r=await codexRenameTask(e,ll,(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),this.onDidChangeChatSessionItemsEmitter.fire()),r}"
-    task_action_methods = current_rename_method + "async pinChatSessionItem(e){let r=await codexPinTask(e,ll,(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),this.onDidChangeChatSessionItemsEmitter.fire()),r}async starChatSessionItem(e){let r=await codexStarTask(e,ll,(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),this.onDidChangeChatSessionItemsEmitter.fire()),r}"
-    new_method = f"{task_action_methods}async trackTabIfNeeded(e){{let r=e.input;if(!(r instanceof ll.TabInputCustom))return;"
-    if "async starChatSessionItem(e)" not in text and current_rename_method in text:
-        text = text.replace(current_rename_method, task_action_methods, 1)
-        changed = True
-    elif old_rename_method in text:
-        text = text.replace(old_rename_method, task_action_methods, 1)
-        changed = True
-    elif "async renameChatSessionItem(e)" not in text:
-        if old_method not in text:
-            raise RuntimeError("Could not find R_ class method anchor in extension.js")
-        text = text.replace(old_method, new_method, 1)
+    # The VS Code webview context menu shows based on data-vscode-context, but
+    # this build does not pass that context object as the command argument.
+    # Remember the last right-clicked row when the webview reports it.
+    context_case = 'case"codex-task-context":{codexRememberTaskContext(r);break}case"codex-task-context-response":{codexResolveTaskContext(r);break}'
+    if context_case not in text:
+        switch_anchor = 'switch(r.type){case"ready":break;'
+        if switch_anchor not in text:
+            raise RuntimeError("Could not find webview message switch for task context bridge")
+        old_context_case = 'case"codex-task-context":{codexRememberTaskContext(r);break}'
+        if old_context_case in text:
+            text = text.replace(old_context_case, context_case, 1)
+        else:
+            text = text.replace(switch_anchor, f"switch(r.type){{{context_case}case\"ready\":break;", 1)
         changed = True
 
-    old_thread_list_method = 'requestThreadList(e){let r=String(this.nextRequestId++),n=new Promise((o,i)=>{this.requestToCallback.set(r,s=>{if(s.error){i(new Error(s.error.message));return}if(s.result==null){i(new Error("No result in response"));return}o(s.result)})});return this.codexAppServer.sendRequest(Nee,r,"thread/list",{limit:50,cursor:null,sortKey:"created_at",modelProviders:e?[ib]:null,archived:!1,sourceKinds:sm}),n}};function Lee'
-    new_thread_list_method = 'requestThreadList(e){let r=String(this.nextRequestId++),n=new Promise((o,i)=>{this.requestToCallback.set(r,s=>{if(s.error){i(new Error(s.error.message));return}if(s.result==null){i(new Error("No result in response"));return}o(s.result)})});return this.codexAppServer.sendRequest(Nee,r,"thread/list",{limit:50,cursor:null,sortKey:"created_at",modelProviders:e?[ib]:null,archived:!1,sourceKinds:sm}),n}requestThreadNameSet(e,r){let n=String(this.nextRequestId++),o=new Promise((i,s)=>{this.requestToCallback.set(n,a=>{if(a.error){s(new Error(a.error.message));return}i(a.result)})});return this.codexAppServer.sendRequest(Nee,n,"thread/name/set",{threadId:e,name:r}),o}};function Lee'
+    # ------------------------------------------------------------------
+    # 3) Inject rename/pin/star methods into the chat-session class.
+    #
+    # We always splice them in just before `async trackTabIfNeeded(`. The
+    # vscode-namespace alias is captured from the trackTabIfNeeded signature
+    # so the methods reference the right alias regardless of build.
+    # ------------------------------------------------------------------
+    if "async renameChatSessionItem(e)" not in text:
+        rename_body = (
+            f"async renameChatSessionItem(e){{let r=await codexRenameTask(e,{vscode_ns},"
+            f"(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));"
+            f"return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),"
+            f"this.onDidChangeChatSessionItemsEmitter.fire()),r}}"
+        )
+        pin_body = (
+            f"async pinChatSessionItem(e){{let r=await codexPinTask(e,{vscode_ns},"
+            f"(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));"
+            f"return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),"
+            f"this.onDidChangeChatSessionItemsEmitter.fire()),r}}"
+        )
+        star_body = (
+            f"async starChatSessionItem(e){{let r=await codexStarTask(e,{vscode_ns},"
+            f"(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));"
+            f"return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),"
+            f"this.onDidChangeChatSessionItemsEmitter.fire()),r}}"
+        )
+        injection = rename_body + pin_body + star_body
+        track_signature = (
+            f"async trackTabIfNeeded(e){{let r=e.input;if(!(r instanceof {vscode_ns}.TabInputCustom))return;"
+        )
+        if track_signature not in text:
+            raise RuntimeError("trackTabIfNeeded anchor moved between detection and injection")
+        text = text.replace(track_signature, injection + track_signature, 1)
+        changed = True
+    elif "async pinChatSessionItem(e)" not in text or "async starChatSessionItem(e)" not in text:
+        # Older patched copy had only renameChatSessionItem. Replace it with
+        # the full triplet.
+        m_rename = re.search(
+            r"async renameChatSessionItem\(e\)\{[^}]*?codexRenameTask\([^)]*\)[^}]*?\}",
+            text,
+            re.DOTALL,
+        )
+        if m_rename is None:
+            raise RuntimeError("Found renameChatSessionItem but could not bracket it for replacement")
+        rename_body = (
+            f"async renameChatSessionItem(e){{let r=await codexRenameTask(e,{vscode_ns},"
+            f"(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));"
+            f"return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),"
+            f"this.onDidChangeChatSessionItemsEmitter.fire()),r}}"
+        )
+        pin_body = (
+            f"async pinChatSessionItem(e){{let r=await codexPinTask(e,{vscode_ns},"
+            f"(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));"
+            f"return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),"
+            f"this.onDidChangeChatSessionItemsEmitter.fire()),r}}"
+        )
+        star_body = (
+            f"async starChatSessionItem(e){{let r=await codexStarTask(e,{vscode_ns},"
+            f"(n,o)=>this.conversationLoader.requestThreadNameSet(n,o));"
+            f"return r&&(this.pendingConversations.delete(codexRenameThreadId(e)),"
+            f"this.onDidChangeChatSessionItemsEmitter.fire()),r}}"
+        )
+        text = text[: m_rename.start()] + rename_body + pin_body + star_body + text[m_rename.end() :]
+        changed = True
+
+    # ------------------------------------------------------------------
+    # 4) Inject `requestThreadNameSet` next to `requestThreadList` on the
+    #    conversation-loader class.
+    # ------------------------------------------------------------------
     if "requestThreadNameSet(e,r)" not in text:
-        if old_thread_list_method not in text:
-            raise RuntimeError("Could not find h0 requestThreadList anchor in extension.js")
-        text = text.replace(old_thread_list_method, new_thread_list_method, 1)
+        # The conversation-loader class wraps requestThreadList and is the one
+        # that sends to *provider_id*. There can be several requestThreadList
+        # methods across classes; we want the one whose sendRequest uses our
+        # captured provider id. We accept any body shape — the only invariant
+        # is the method name, the sendRequest call to *provider_id*, and the
+        # trailing `,n}};` (return promise + close method + close class body).
+        m_list = re.search(
+            rf'(requestThreadList\(e\)\{{.*?sendRequest\({provider_id},r,"thread/list",.*?,n\}})\}};',
+            text,
+            re.DOTALL,
+        )
+        if m_list is None:
+            raise RuntimeError("Could not find requestThreadList method bound to the chat-session-provider id")
+        list_method = m_list.group(1)
+        name_set_method = (
+            f"requestThreadNameSet(e,r){{let n=String(this.nextRequestId++),"
+            f"o=new Promise((i,s)=>{{this.requestToCallback.set(n,a=>{{"
+            f"if(a.error){{s(new Error(a.error.message));return}}i(a.result)}})}});"
+            f'return this.codexAppServer.sendRequest({provider_id},n,"thread/name/set",'
+            f"{{threadId:e,name:r}}),o}}"
+        )
+        replacement = list_method + name_set_method + "};"
+        text = text[: m_list.start()] + replacement + text[m_list.end() :]
         changed = True
 
-    old_register = "e.push(at.commands.registerCommand(o6e,async()=>{await Qo(),tt.triggerNewChatViaWebview()})),zr(Ht.COMMENT_CODELENS_ENABLED,!0)"
-    old_rename_register_picker_reload = 'e.push(at.commands.registerCommand("chatgpt.renameTask",async J=>{try{let xe=!codexRenameThreadId(J);if(xe){let Ye=await g?.provideChatSessionItems({isCancellationRequested:!1,onCancellationRequested:()=>({dispose(){}})}),pt=(Ye??[]).map(zt=>({label:String(zt.label||"Untitled task"),description:String(zt.id||""),item:zt})),ir=await at.window.showQuickPick(pt,{placeHolder:"Select a Codex task to rename",matchOnDescription:!0});if(!ir)return;J=ir.item}let nr=await g?.renameChatSessionItem(J);nr&&xe&&at.commands.executeCommand("workbench.action.webview.reloadWebviewAction").then(()=>{},()=>{})}catch(xe){at.window.showErrorMessage(`Failed to rename Codex task: ${xe instanceof Error?xe.message:String(xe)}`)}}))'
-    old_rename_register_picker = 'e.push(at.commands.registerCommand("chatgpt.renameTask",async J=>{try{if(!codexRenameThreadId(J)){let Ye=await g?.provideChatSessionItems({isCancellationRequested:!1,onCancellationRequested:()=>({dispose(){}})}),pt=(Ye??[]).map(zt=>({label:String(zt.label||"Untitled task"),description:String(zt.id||""),item:zt})),ir=await at.window.showQuickPick(pt,{placeHolder:"Select a Codex task to rename",matchOnDescription:!0});if(!ir)return;J=ir.item}await g?.renameChatSessionItem(J)}catch(xe){at.window.showErrorMessage(`Failed to rename Codex task: ${xe instanceof Error?xe.message:String(xe)}`)}}))'
-    new_rename_register = 'e.push(at.commands.registerCommand("chatgpt.renameTask",async J=>{try{await g?.renameChatSessionItem(J)}catch(xe){at.window.showErrorMessage(`Failed to rename Codex task: ${xe instanceof Error?xe.message:String(xe)}`)}}))'
-    new_pin_register = 'e.push(at.commands.registerCommand("chatgpt.pinTask",async J=>{try{await g?.pinChatSessionItem(J)}catch(xe){at.window.showErrorMessage(`Failed to pin Codex task: ${xe instanceof Error?xe.message:String(xe)}`)}}))'
-    new_star_register = 'e.push(at.commands.registerCommand("chatgpt.starTask",async J=>{try{await g?.starChatSessionItem(J)}catch(xe){at.window.showErrorMessage(`Failed to star Codex task: ${xe instanceof Error?xe.message:String(xe)}`)}}))'
-    task_action_registers = f"{new_rename_register},{new_pin_register},{new_star_register}"
-    new_register = f"e.push(at.commands.registerCommand(o6e,async()=>{{await Qo(),tt.triggerNewChatViaWebview()}})),{task_action_registers},zr(Ht.COMMENT_CODELENS_ENABLED,!0)"
-    if 'registerCommand("chatgpt.pinTask"' not in text and new_rename_register in text:
-        text = text.replace(new_rename_register, task_action_registers, 1)
+    # ------------------------------------------------------------------
+    # 5) Register the rename/pin/star commands during activation.
+    #
+    # We anchor on the `triggerNewChatViaWebview()` call, which is stable
+    # across builds, and inject right after the existing `e.push(...)` for it.
+    # ------------------------------------------------------------------
+    if 'registerCommand("chatgpt.renameTask"' not in text:
+        m_activate = re.search(
+            rf"e\.push\((?P<vscNs>{JS_ID})\.commands\.registerCommand\((?P<cmdId>{JS_ID}),"
+            rf"async\(\)=>\{{await\s+(?P<authFn>{JS_ID})\(\),\s*(?P<sidebar>{JS_ID})\.triggerNewChatViaWebview\(\)\}}\)\)",
+            text,
+        )
+        if m_activate is None:
+            raise RuntimeError("Could not find triggerNewChatViaWebview command registration in extension.js")
+        vsc_ns = m_activate.group("vscNs")
+
+        def mk_register(command_id: str, action_label: str, method_name: str) -> str:
+            return (
+                f'e.push({vsc_ns}.commands.registerCommand("{command_id}",async J=>{{'
+                f"try{{await g?.{method_name}(await codexWithTaskContext(J,{webview_provider_var}))}}"
+                f"catch(xe){{{vsc_ns}.window.showErrorMessage("
+                f"`Failed to {action_label} Codex task: ${{xe instanceof Error?xe.message:String(xe)}}`)}}}}))"
+            )
+
+        registrations = ",".join(
+            (
+                mk_register("chatgpt.renameTask", "rename", "renameChatSessionItem"),
+                mk_register("chatgpt.pinTask", "pin", "pinChatSessionItem"),
+                mk_register("chatgpt.unpinTask", "unpin", "pinChatSessionItem"),
+                mk_register("chatgpt.starTask", "star", "starChatSessionItem"),
+                mk_register("chatgpt.unstarTask", "unstar", "starChatSessionItem"),
+            )
+        )
+        text = text[: m_activate.end()] + "," + registrations + text[m_activate.end() :]
         changed = True
-    elif old_rename_register_picker_reload in text:
-        text = text.replace(old_rename_register_picker_reload, task_action_registers, 1)
+    elif (
+        'registerCommand("chatgpt.pinTask"' not in text
+        or 'registerCommand("chatgpt.unpinTask"' not in text
+        or 'registerCommand("chatgpt.starTask"' not in text
+        or 'registerCommand("chatgpt.unstarTask"' not in text
+    ):
+        # Older patched extension only had rename. Replace just the rename
+        # entry with all three registrations.
+        m_rename_reg = re.search(
+            r'e\.push\(([A-Za-z_$][\w$]*)\.commands\.registerCommand\("chatgpt\.renameTask",[^)]*?\}\)\)',
+            text,
+            re.DOTALL,
+        )
+        if m_rename_reg is None:
+            raise RuntimeError("Found chatgpt.renameTask registration but could not bracket it")
+        vsc_ns = m_rename_reg.group(1)
+
+        def mk_register(command_id: str, action_label: str, method_name: str) -> str:
+            return (
+                f'e.push({vsc_ns}.commands.registerCommand("{command_id}",async J=>{{'
+                f"try{{await g?.{method_name}(await codexWithTaskContext(J,{webview_provider_var}))}}"
+                f"catch(xe){{{vsc_ns}.window.showErrorMessage("
+                f"`Failed to {action_label} Codex task: ${{xe instanceof Error?xe.message:String(xe)}}`)}}}}))"
+            )
+
+        registrations = ",".join(
+            (
+                mk_register("chatgpt.renameTask", "rename", "renameChatSessionItem"),
+                mk_register("chatgpt.pinTask", "pin", "pinChatSessionItem"),
+                mk_register("chatgpt.unpinTask", "unpin", "pinChatSessionItem"),
+                mk_register("chatgpt.starTask", "star", "starChatSessionItem"),
+                mk_register("chatgpt.unstarTask", "unstar", "starChatSessionItem"),
+            )
+        )
+        text = text[: m_rename_reg.start()] + registrations + text[m_rename_reg.end() :]
         changed = True
-    elif old_rename_register_picker in text:
-        text = text.replace(old_rename_register_picker, task_action_registers, 1)
-        changed = True
-    elif 'registerCommand("chatgpt.renameTask"' not in text:
-        if old_register not in text:
-            raise RuntimeError("Could not find activation command-registration anchor in extension.js")
-        text = text.replace(old_register, new_register, 1)
-        changed = True
+
+    command_context_replacements = (
+        ("renameChatSessionItem", "g?.renameChatSessionItem(J)"),
+        ("pinChatSessionItem", "g?.pinChatSessionItem(J)"),
+        ("starChatSessionItem", "g?.starChatSessionItem(J)"),
+    )
+    for method_name, old_call in command_context_replacements:
+        new_call = f"g?.{method_name}(await codexWithTaskContext(J,{webview_provider_var}))"
+        while old_call in text:
+            text = text.replace(old_call, new_call, 1)
+            changed = True
 
     if changed:
         write(extension_js, text)
@@ -276,99 +543,424 @@ def iter_webview_assets(extension_dir: Path):
     yield from assets_dir.glob("*.js")
 
 
-def find_asset(extension_dir: Path, token: str) -> Path:
-    for path in iter_webview_assets(extension_dir) or []:
-        if token in read(path):
-            return path
-    raise RuntimeError(f"Could not find webview asset containing {token!r}")
+SIDEBAR_THREAD_ROW_RE = re.compile(
+    rf"sidebarThreadRow:\(\{{active:e,hostId:t,id:n,kind:r,pinned:i,title:a\}}\)=>"
+    rf"\(\{{\[(?P<ns>{JS_ID})\.sidebarThreadActive\]:String\(e\),"
+    rf"\[(?P=ns)\.sidebarThreadHostId\]:t\?\?``,"
+    rf"\[(?P=ns)\.sidebarThreadId\]:n,"
+    rf"\[(?P=ns)\.sidebarThreadKind\]:r,"
+    rf"\[(?P=ns)\.sidebarThreadPinned\]:String\(i\),"
+    rf"\[(?P=ns)\.sidebarThreadRow\]:``,"
+    rf"\[(?P=ns)\.sidebarThreadTitle\]:a\}}\)"
+)
+
+CODEX_CONTEXT_BRIDGE_JS = r"""
+;(function(){try{if(typeof document==="undefined"||window.__codexTaskContextBridgeV5)return;window.__codexTaskContextBridgeV5=!0;let l="",u=0;function c(e){let t=e.getAttribute(`data-app-action-sidebar-thread-id`)||``;if(!t)return null;let n=(e.getAttribute(`data-app-action-sidebar-thread-title`)||e.textContent||``).trim(),a=n.replace(/^⭐\s*/,``),r={codexTask:!0,webviewSection:`codex-task`,codexThreadId:t,codexThreadTitle:n,codexStarred:n.startsWith(`⭐ `),codexPinned:a.startsWith(`📌 `),preventDefaultContextMenuItems:!0},o=JSON.stringify(r);e.setAttribute(`data-vscode-context`,o);for(let i of e.querySelectorAll(`*`))i.setAttribute(`data-vscode-context`,o);window.__codexLastTaskContext=r;return r}function p(){return window.__codexLastTaskContext||c(document.querySelector(`[data-app-action-sidebar-thread-row]:hover`))||c(document.querySelector(`[data-app-action-sidebar-thread-row]`))}function d(e,t){if(!t||typeof window.__codexPostMessage!="function")return;let n=Date.now();if(!e||e!==l||n-u>500){l=e,u=n;window.__codexPostMessage(`codex-task-context`,t)}}function s(e){let t=e&&e.target;if(t instanceof Element){let e=t.closest(`[data-app-action-sidebar-thread-row]`);if(e){let t=c(e);t&&d(t.codexThreadId,t)}}}function i(){document.querySelectorAll(`[data-app-action-sidebar-thread-row]`).forEach(c)}window.addEventListener(`message`,function(e){let t=e&&e.data;if(t&&t.type===`codex-request-task-context`){let e=p();typeof window.__codexPostMessage=="function"&&window.__codexPostMessage(`codex-task-context-response`,{...(e||{}),requestId:t.requestId})}},!0);document.addEventListener(`pointerover`,s,!0);document.addEventListener(`mousemove`,s,!0);document.addEventListener(`pointerdown`,s,!0);document.addEventListener(`contextmenu`,s,!0);new MutationObserver(i).observe(document.documentElement,{childList:!0,subtree:!0,attributes:!0,attributeFilter:[`data-app-action-sidebar-thread-id`,`data-app-action-sidebar-thread-title`]});setTimeout(i,0),setTimeout(i,250),setTimeout(i,1000)}catch(e){console.warn(`codex task context bridge failed`,e)}})();
+"""
+
+CODEX_CONTEXT_RESPONDER_JS = r"""
+;(function(){try{if(typeof document==="undefined"||window.__codexTaskContextResponderV1)return;window.__codexTaskContextResponderV1=!0;function c(e){if(!(e instanceof Element))return null;let t=e.closest(`[data-app-action-sidebar-thread-row]`);if(!t)return null;let n=t.getAttribute(`data-app-action-sidebar-thread-id`)||``;if(!n)return null;let r=(t.getAttribute(`data-app-action-sidebar-thread-title`)||t.textContent||``).trim(),i=r.replace(/^⭐\s*/,``),o={codexTask:!0,webviewSection:`codex-task`,codexThreadId:n,codexThreadTitle:r,codexStarred:r.startsWith(`⭐ `),codexPinned:i.startsWith(`📌 `),preventDefaultContextMenuItems:!0};window.__codexLastTaskContext=o;return o}function s(){return window.__codexLastTaskContext||c(document.querySelector(`[data-app-action-sidebar-thread-row]:hover`))||c(document.querySelector(`[data-app-action-sidebar-thread-row]`))}function p(e){let t=c(e.target);t&&typeof window.__codexPostMessage=="function"&&window.__codexPostMessage(`codex-task-context`,t)}window.addEventListener(`message`,function(e){let t=e&&e.data;if(t&&t.type===`codex-request-task-context`){let e=s();typeof window.__codexPostMessage=="function"&&window.__codexPostMessage(`codex-task-context-response`,{...(e||{}),requestId:t.requestId})}},!0);document.addEventListener(`pointerover`,p,!0);document.addEventListener(`mousemove`,p,!0);document.addEventListener(`pointerdown`,p,!0);document.addEventListener(`contextmenu`,p,!0)}catch(e){console.warn(`codex task context responder failed`,e)}})();
+"""
 
 
-def find_asset_all(extension_dir: Path, tokens: tuple[str, ...]) -> Path:
-    for path in iter_webview_assets(extension_dir) or []:
+def _patch_sidebar_thread_row(assets_dir: Path) -> bool:
+    """Append data-vscode-context to the sidebarThreadRow data-attribute helper.
+
+    The helper appears in one of the webview *.js files; we locate it by
+    regex on the stable property names so the namespace alias may be any
+    minified identifier.
+    """
+    changed = False
+    found_helper = False
+    already_patched = False
+    for path in assets_dir.glob("*.js"):
         text = read(path)
-        if all(token in text for token in tokens):
-            return path
-    raise RuntimeError(f"Could not find webview asset containing all tokens: {tokens!r}")
+        stripped = re.sub(
+            r";\(function\(\)\{try\{if\(typeof document===`undefined`\|\|window\.__codexTaskContextBridgeV\d+\).*?\}\)\(\);",
+            "",
+            text,
+        )
+        if stripped != text:
+            text = stripped
+            changed = True
+        m = SIDEBAR_THREAD_ROW_RE.search(text)
+        if not m:
+            if "webviewSection:`codex-task`,codexThreadId:n,codexThreadTitle:a" in text:
+                already_patched = True
+            continue
+        found_helper = True
+        # Already patched if the JSON.stringify call is right after the title slot.
+        tail = text[m.end() : m.end() + 200]
+        if "webviewSection:`codex-task`,codexThreadId:n,codexThreadTitle:a" in text[m.start() : m.end() + 200]:
+            already_patched = True
+            continue
+        ns = m.group("ns")
+        replacement = (
+            f"sidebarThreadRow:({{active:e,hostId:t,id:n,kind:r,pinned:i,title:a}})=>"
+            f"({{[{ns}.sidebarThreadActive]:String(e),"
+            f"[{ns}.sidebarThreadHostId]:t??``,"
+            f"[{ns}.sidebarThreadId]:n,"
+            f"[{ns}.sidebarThreadKind]:r,"
+            f"[{ns}.sidebarThreadPinned]:String(i),"
+            f"[{ns}.sidebarThreadRow]:``,"
+            f"[{ns}.sidebarThreadTitle]:a,"
+            f'"data-vscode-context":JSON.stringify({{codexTask:!0,webviewSection:`codex-task`,'
+            f"codexThreadId:n,codexThreadTitle:a,codexStarred:String(a??``).trim().startsWith(`⭐ `),"
+            f"codexPinned:String(a??``).trim().replace(/^⭐\\s*/,``).startsWith(`📌 `),"
+            f"preventDefaultContextMenuItems:!0}})}})"
+        )
+        text = text[: m.start()] + replacement + text[m.end() :]
+        if "__codexTaskContextBridgeV5" not in text:
+            text += CODEX_CONTEXT_BRIDGE_JS
+        write(path, text)
+        changed = True
+        break  # only one file contains it
+
+    if not changed and already_patched:
+        for path in assets_dir.glob("*.js"):
+            text = read(path)
+            if "webviewSection:`codex-task`,codexThreadId:n,codexThreadTitle:a" not in text:
+                continue
+            if "__codexTaskContextBridgeV5" in text:
+                break
+            write(path, text + CODEX_CONTEXT_BRIDGE_JS)
+            changed = True
+            break
+
+    if not changed and not (found_helper or already_patched):
+        raise RuntimeError("Could not find sidebarThreadRow data-attributes helper in webview assets")
+    return changed
+
+
+def _patch_vscode_post_message_bridge(assets_dir: Path) -> bool:
+    """Expose the existing VS Code API object for our right-click bridge."""
+    changed = False
+    found = False
+    for path in assets_dir.glob("*.js"):
+        text = read(path)
+        if "acquireVsCodeApi()" not in text:
+            continue
+        found = True
+        if "__codexPostMessage" in text:
+            continue
+        m = re.search(rf"var\s+(?P<api>{JS_ID})=acquireVsCodeApi\(\),(?P<cls>{JS_ID})=class", text)
+        if m is None:
+            continue
+        api = m.group("api")
+        cls = m.group("cls")
+        replacement = (
+            f"var {api}=acquireVsCodeApi();"
+            f"globalThis.__codexPostMessage=function(e,t){{{api}.postMessage({{...t,type:e}})}};"
+            f"var {cls}=class"
+        )
+        text = text[: m.start()] + replacement + text[m.end() :]
+        if "__codexTaskContextResponderV1" not in text:
+            text += CODEX_CONTEXT_RESPONDER_JS
+        write(path, text)
+        changed = True
+        break
+    if not (changed or any("__codexPostMessage" in read(path) for path in assets_dir.glob("*.js"))):
+        if found:
+            raise RuntimeError("Found acquireVsCodeApi but could not expose Codex postMessage bridge")
+        raise RuntimeError("Could not find acquireVsCodeApi in webview assets")
+    if not any("__codexTaskContextResponderV1" in read(path) for path in assets_dir.glob("*.js")):
+        for path in assets_dir.glob("*.js"):
+            text = read(path)
+            if "__codexPostMessage" not in text:
+                continue
+            write(path, text + CODEX_CONTEXT_RESPONDER_JS)
+            changed = True
+            break
+    return changed
+
+
+def _patch_task_row_data_attrs(
+    task_row_text: str,
+    archive_string: str,
+    title_pref_vars: tuple[str, ...] = (),
+    *,
+    thread_id_expr: str | None = None,
+    title_expr_override: str | None = None,
+    search_back_window: int = 0,
+    search_window: int = 4000,
+) -> tuple[str, bool]:
+    """Splice codexRenameContext into a task-row React-memo block.
+
+    *archive_string* is the stable literal (e.g. ``"codex.localTaskRow.archiveTask"``)
+    that scopes the search to one row. *title_pref_vars* is a hint for variables
+    that may carry the row title (used to populate `codexThreadTitle` in the
+    injected JSON context); when none are present, falls back to an empty
+    string. *thread_id_expr* and *title_expr_override* let callers provide the
+    row's actual minified variables when the upstream dataAttributes object
+    does not carry the Codex thread id. *search_window* and
+    *search_back_window* bound the search around the archive_string anchor so
+    we never accidentally match code belonging to a different row.
+
+    Returns (new_text, changed).
+    """
+    text = task_row_text
+
+    anchor_idx = text.find(archive_string)
+    if anchor_idx == -1:
+        raise RuntimeError(f"Could not find task-row anchor: {archive_string!r}")
+
+    window_start = max(0, anchor_idx - search_back_window)
+    window_end = min(len(text), anchor_idx + search_window)
+
+    # Look forward (within the window only) for either:
+    #   dataAttributes:<var>,archiveAriaLabel
+    # or
+    #   archiveAriaLabel:<var>,...,dataAttributes:<var>
+    # The two orderings show up across the local- vs cloud-task rows.
+    attrs_re = re.compile(rf"dataAttributes:(?P<v>{JS_ID})(?:,archiveAriaLabel|\}}\))")
+    attr_matches = list(attrs_re.finditer(text, window_start, window_end))
+    if search_back_window:
+        attr_matches = [m for m in attr_matches if m.start() < anchor_idx]
+    else:
+        attr_matches = [m for m in attr_matches if m.start() >= anchor_idx]
+    m_attrs = attr_matches[-1] if search_back_window else (attr_matches[0] if attr_matches else None)
+    if m_attrs is None:
+        raise RuntimeError(f"Could not find dataAttributes argument for row near {archive_string!r}")
+    data_var = m_attrs.group("v")
+    if data_var == "codexRenameContext":
+        return text, False
+
+    # Identify the React-memo slot for *data_var*: a `t[N]=<data_var>,` or
+    # `t[N]=<data_var>` (no trailing comma if last in the assigns) that
+    # appears within the search window after dataAttributes.
+    m_slot = re.compile(rf"t\[(?P<idx>\d+)\]={re.escape(data_var)}(?=[,)])").search(text, m_attrs.end(), window_end)
+    if m_slot is None:
+        raise RuntimeError(f"Could not find React-memo slot for var {data_var!r} near {archive_string!r}")
+    slot = m_slot.group("idx")
+    slot_check_re = re.compile(rf"t\[{slot}\]!=={re.escape(data_var)}\|\|")
+
+    if title_expr_override is not None:
+        title_expr = title_expr_override
+    else:
+        # Build a title fallback from candidate vars if they exist near the anchor.
+        available = []
+        window_text = text[window_start:window_end]
+        for v in title_pref_vars:
+            if re.search(rf"(?:[,{{]){re.escape(v)}[,}}]|\b{re.escape(v)}={JS_ID}", window_text):
+                available.append(v)
+        if available:
+            title_expr = "||".join(f'(typeof {v}=="string"?{v}:"")' for v in available) + '||""'
+        else:
+            title_expr = '""'
+    id_expr = thread_id_expr or f"{data_var}?.codexThreadId"
+
+    rename_context_decl = (
+        f'let codexRenameContext={{...{data_var},"data-vscode-context":JSON.stringify({{'
+        f'codexTask:!0,webviewSection:`codex-task`,codexThreadId:String({id_expr}??""),'
+        f"codexThreadTitle:{title_expr},codexStarred:String({title_expr}??``).trim().startsWith(`⭐ `),"
+        f"codexPinned:String({title_expr}??``).trim().replace(/^⭐\\s*/,``).startsWith(`📌 `),"
+        f"preventDefaultContextMenuItems:!0}})}};"
+    )
+
+    # The let-prefix that starts the React-memo chain containing our slot.
+    # Strategy: find the slot check, then scan backwards over the chain to
+    # find the FIRST `t[k]!==<x>||` in this chain (the chain starts after a
+    # `;` or `return ` boundary). Inject the codexRenameContext declaration
+    # just before that boundary.
+    slot_check_match = slot_check_re.search(text, window_start, m_attrs.start())
+    if slot_check_match is None:
+        raise RuntimeError(f"Could not find slot check t[{slot}]!=={data_var} near {archive_string!r}")
+
+    # Walk backwards from slot_check_match.start() to find the chain boundary.
+    # Each link of the chain is `t[<n>]!==<var>||`. Tracking the leftmost
+    # `t[<n>]!==<var>` in the chain.
+    i = slot_check_match.start()
+    leftmost = i
+    while True:
+        prev_link = re.search(rf"t\[\d+\]!=={JS_ID}\|\|$", text[:leftmost])
+        if prev_link is None:
+            break
+        if prev_link.end() != leftmost:
+            break
+        leftmost = prev_link.start()
+        if leftmost < 0:
+            break
+
+    # The chain's left edge is at `leftmost`. The character immediately before
+    # it should be either `;` or end of `return `. We insert the rename
+    # context declaration just after the previous statement boundary.
+    if leftmost > 0:
+        # Find the statement boundary preceding the chain: nearest `;` to the
+        # left, OR the start of a `return ` if any.
+        boundary = leftmost
+        # Move boundary back over an optional `return ` keyword.
+        m_ret = re.search(r"return\s+$", text[:boundary])
+        if m_ret is not None:
+            boundary = m_ret.start()
+        # Insert the codexRenameContext declaration at *boundary*.
+        text = text[:boundary] + rename_context_decl + text[boundary:]
+    else:
+        text = rename_context_decl + text
+
+    # Replace the three references to data_var with codexRenameContext,
+    # bounded to the window so we never touch another row.
+    insert_pos = text.find(rename_context_decl)
+    if insert_pos == -1:
+        raise RuntimeError("Lost codexRenameContext insertion point")
+    after_pos = insert_pos + len(rename_context_decl)
+    window_end_now = after_pos + search_window  # text grew; extend by same window
+    if window_end_now > len(text):
+        window_end_now = len(text)
+
+    def replace_once(pattern: re.Pattern[str], replacement: str) -> None:
+        nonlocal text, window_end_now
+        m = pattern.search(text, after_pos, window_end_now)
+        if m is None:
+            raise RuntimeError(f"Could not apply replacement for pattern {pattern.pattern!r}")
+        new_text = text[: m.start()] + replacement + text[m.end() :]
+        window_end_now += len(replacement) - (m.end() - m.start())
+        text = new_text
+
+    replace_once(slot_check_re, f"t[{slot}]!==codexRenameContext||")
+    replace_once(
+        re.compile(rf"dataAttributes:{re.escape(data_var)}(?=[,)}}])"),
+        "dataAttributes:codexRenameContext",
+    )
+    replace_once(
+        re.compile(rf"t\[{slot}\]={re.escape(data_var)}(?=[,)])"),
+        f"t[{slot}]=codexRenameContext",
+    )
+
+    return text, True
 
 
 def patch_rename_webview_assets(extension_dir: Path) -> bool:
+    """Add data-vscode-context to webview rows so VS Code's right-click menu
+    can identify them as Codex task rows.
+
+    The context menu is rendered by VS Code from the DOM row that was
+    right-clicked, so the row itself must carry the task id/title. The helper
+    patch covers builds where parent attributes flow through cleanly; the row
+    splice below covers builds where the task rows receive a generic
+    dataAttributes object that does not include codexThreadId.
+    """
     assets_dir = extension_dir / "webview" / "assets"
     if not assets_dir.exists():
         return False
+    changed = _patch_sidebar_thread_row(assets_dir)
+    changed |= _patch_vscode_post_message_bridge(assets_dir)
 
-    old = "sidebarThreadRow:({active:e,hostId:t,id:n,kind:r,pinned:i,title:a})=>({[U.sidebarThreadActive]:String(e),[U.sidebarThreadHostId]:t??``,[U.sidebarThreadId]:n,[U.sidebarThreadKind]:r,[U.sidebarThreadPinned]:String(i),[U.sidebarThreadRow]:``,[U.sidebarThreadTitle]:a})"
-    new = 'sidebarThreadRow:({active:e,hostId:t,id:n,kind:r,pinned:i,title:a})=>({[U.sidebarThreadActive]:String(e),[U.sidebarThreadHostId]:t??``,[U.sidebarThreadId]:n,[U.sidebarThreadKind]:r,[U.sidebarThreadPinned]:String(i),[U.sidebarThreadRow]:``,[U.sidebarThreadTitle]:a,"data-vscode-context":JSON.stringify({webviewSection:`codex-task`,codexThreadId:n,codexThreadTitle:a,preventDefaultContextMenuItems:!0})})'
-
-    changed = False
-    saw_patched_helper = False
-    for path in assets_dir.glob("*.js"):
-        text = read(path)
-        if new in text:
-            saw_patched_helper = True
-            continue
-        if old in text:
-            write(path, text.replace(old, new, 1))
-            changed = True
-
-    if not changed and not saw_patched_helper:
-        raise RuntimeError("Could not find sidebarThreadRow data-attributes helper in webview assets")
-
-    local_thread = find_asset_all(
+    row_asset = _find_asset_by_regex(
         extension_dir,
-        ("function Dl(e){", "function pl(e){", "function Ql(e){", "codex.localTaskRow.archiveTask"),
+        r"codex\.localTaskRow\.archiveTask[\s\S]*?dataAttributes:|dataAttributes:[\s\S]*?codex\.cloudTaskRow\.archiveTask",
     )
-    text = read(local_thread)
-
-    local_context = 'let Qe=We,codexRenameContext={...R,"data-vscode-context":JSON.stringify({webviewSection:`codex-task`,codexThreadId:n,codexThreadTitle:typeof w=="string"?w:typeof ge=="string"?ge:"",preventDefaultContextMenuItems:!0})},$e;'
-    if "codexThreadId:n,codexThreadTitle" not in text:
-        local_anchor = "let Qe=We,$e;"
-        if local_anchor not in text:
-            raise RuntimeError("Could not find local task row rename context anchor")
-        text = text.replace(local_anchor, local_context, 1)
-        text = text.replace("t[63]!==R||", "t[63]!==codexRenameContext||", 1)
-        text = text.replace(
-            "dataAttributes:R,archiveAriaLabel", "dataAttributes:codexRenameContext,archiveAriaLabel", 1
+    if row_asset is not None:
+        text = read(row_asset)
+        text, local_changed = _patch_task_row_data_attrs(
+            text,
+            "codex.localTaskRow.archiveTask",
+            thread_id_expr="n",
+            title_expr_override='(typeof ue=="string"?ue:typeof He=="string"?He:typeof nt=="string"?nt:"")',
+            search_window=12000,
         )
-        text = text.replace("t[63]=R,", "t[63]=codexRenameContext,", 1)
-        changed = True
-
-    cloud_context = 'let codexRenameContext={...w,"data-vscode-context":JSON.stringify({webviewSection:`codex-task`,codexThreadId:P,codexThreadTitle:typeof I=="string"?I:"",preventDefaultContextMenuItems:!0})};let be;'
-    if "codexThreadId:P,codexThreadTitle" not in text:
-        cloud_anchor = "let be;t[50]!==w||"
-        if cloud_anchor not in text:
-            raise RuntimeError("Could not find cloud task row rename context anchor")
-        text = text.replace(cloud_anchor, cloud_context + "t[50]!==codexRenameContext||", 1)
-        text = text.replace(
-            "renderActions:d,dataAttributes:w})", "renderActions:d,dataAttributes:codexRenameContext})", 1
+        text, cloud_changed = _patch_task_row_data_attrs(
+            text,
+            "codex.cloudTaskRow.archiveTask",
+            thread_id_expr="n.id",
+            title_expr_override='(typeof F=="string"?F:typeof je=="string"?je:"")',
+            search_back_window=12000,
+            search_window=12000,
         )
-        text = text.replace("t[50]=w,", "t[50]=codexRenameContext,", 1)
-        changed = True
-
-    if changed:
-        write(local_thread, text)
+        if local_changed or cloud_changed:
+            write(row_asset, text)
+            changed = True
     return changed
+
+
+def _find_asset_by_literal(extension_dir: Path, literal: str) -> Path | None:
+    """Return the first webview asset that contains *literal*, or None."""
+    for path in iter_webview_assets(extension_dir) or []:
+        if literal in read(path):
+            return path
+    return None
+
+
+def _find_asset_by_regex(extension_dir: Path, pattern: str, flags: int = 0) -> Path | None:
+    compiled = re.compile(pattern, flags)
+    for path in iter_webview_assets(extension_dir) or []:
+        if compiled.search(read(path)):
+            return path
+    return None
 
 
 def patch_recent_tasks_menu(extension_dir: Path) -> bool:
     changed = False
-    local_thread = find_asset_all(
+
+    # ------------------------------------------------------------------
+    # Recent-tasks header asset. The literal `header.recentTasks.seeAll`
+    # appears in 60+ locale translation files, so we discriminate by
+    # requiring a JSX call to that message id (only the implementation has
+    # one) OR the slice expression that builds the 3-item preview list.
+    # ------------------------------------------------------------------
+    recent_asset = _find_asset_by_regex(
         extension_dir,
-        ("function Ql(e){", "function xu(e){", "codex.profileDropdown.keyboardShortcuts"),
+        rf"\(0,{JS_ID}\.jsx\)\({JS_ID},\{{id:`header\.recentTasks\.seeAll`",
     )
-    text = read(local_thread)
+    if recent_asset is None:
+        recent_asset = _find_asset_by_regex(
+            extension_dir,
+            r"=\(0,[A-Za-z_$][\w$]*\.default\)\(\[\.\.\.e,\.\.\.n\],[A-Za-z_$][\w$]*\)\.slice\(0,Math\.max\(3,e\.length\)\)",
+        )
+    if recent_asset is None:
+        raise RuntimeError(
+            "Could not find recent-tasks-menu asset (header.recentTasks.seeAll JSX call or slice anchor)"
+        )
+    text = read(recent_asset)
 
-    old_limit = "c=(0,Zl.default)([...e,...n],tu).slice(0,Math.max(3,e.length))"
-    new_limit = "c=(0,Zl.default)([...e,...n],tu)"
-    if old_limit in text:
-        text = text.replace(old_limit, new_limit, 1)
+    # 1) Remove the .slice(0, Math.max(3, e.length)) cap.
+    text, n = re.subn(
+        rf"(=\(0,{JS_ID}\.default\)\(\[\.\.\.e,\.\.\.n\],{JS_ID}\))\.slice\(0,Math\.max\(3,e\.length\)\)",
+        r"\1",
+        text,
+        count=1,
+    )
+    if n:
         changed = True
 
-    old_view_all = "let f;t[17]!==n.length||t[18]!==u?(f=u&&(0,Q.jsx)(`div`,{className:`flex w-full cursor-interaction items-center gap-0 rounded-md px-[var(--padding-row-x)] py-1 text-sm opacity-40 hover:opacity-80`,onClick:$l,children:(0,Q.jsx)(Y,{id:`header.recentTasks.seeAll`,defaultMessage:`View all ({total})`,description:`See all recent tasks link with total count`,values:{total:n.length}})}),t[17]=n.length,t[18]=u,t[19]=f):f=t[19];let p;"
-    new_view_all = "let f=null;t[17]=n.length,t[18]=u,t[19]=f;let p;"
-    if old_view_all in text:
-        text = text.replace(old_view_all, new_view_all, 1)
-        changed = True
+    # 2) Neutralize the "View all" link. We replace the entire
+    #    `let <F>;t[i1]!==n.length||t[i2]!==<U>?(...):...=t[i3];let <P>;`
+    #    block with `let <F>=null;t[i1]=n.length,t[i2]=<U>,t[i3]=<F>;let <P>;`.
+    #
+    # Anchor on the `header.recentTasks.seeAll` literal: from that point,
+    # scan backwards for the `let <F>;t[i1]!==n.length` opening and forward
+    # for the `let <P>;` close. This avoids fragile regex over the deeply-
+    # nested JSX argument.
+    see_all_idx = text.find("`header.recentTasks.seeAll`")
+    if see_all_idx != -1:
+        # Match the OPEN of the View-all block: `let <F>;t[i1]!==n.length||t[i2]!==<U>?(`
+        open_re = re.compile(
+            rf"let\s+(?P<f>{JS_ID});" rf"t\[(?P<i1>\d+)\]!==n\.length\|\|t\[(?P<i2>\d+)\]!==(?P<u>{JS_ID})\?\("
+        )
+        m_open = None
+        for m in open_re.finditer(text, max(0, see_all_idx - 2000), see_all_idx):
+            m_open = m  # take the LAST match before seeAll
+        # Match the CLOSE: `,t[i1]=n.length,t[i2]=<U>,t[i3]=<F>):<F>=t[i3];let <P>;`
+        if m_open is not None:
+            close_re = re.compile(
+                rf",t\[{m_open.group('i1')}\]=n\.length,"
+                rf"t\[{m_open.group('i2')}\]={re.escape(m_open.group('u'))},"
+                rf"t\[(?P<i3>\d+)\]={re.escape(m_open.group('f'))}\):"
+                rf"{re.escape(m_open.group('f'))}=t\[(?P=i3)\];"
+                rf"let\s+(?P<p>{JS_ID});"
+            )
+            m_close = close_re.search(text, see_all_idx, see_all_idx + 2000)
+            if m_close is not None:
+                replacement = (
+                    f"let {m_open.group('f')}=null;"
+                    f"t[{m_open.group('i1')}]=n.length,"
+                    f"t[{m_open.group('i2')}]={m_open.group('u')},"
+                    f"t[{m_close.group('i3')}]={m_open.group('f')};"
+                    f"let {m_close.group('p')};"
+                )
+                text = text[: m_open.start()] + replacement + text[m_close.end() :]
+                changed = True
 
+    # 3) Section / outer height tweaks. Class names are stable literals.
     old_section_height = "className:`vertical-scroll-fade-mask flex max-h-[60vh] flex-col gap-0 overflow-y-auto pb-1`"
     new_section_height = "className:`vertical-scroll-fade-mask flex max-h-[calc(var(--radix-popper-available-height)_-_120px)] flex-col gap-0 overflow-y-auto pb-1`"
     if old_section_height in text:
@@ -381,104 +973,130 @@ def patch_recent_tasks_menu(extension_dir: Path) -> bool:
         text = text.replace(old_outer_height, new_outer_height, 1)
         changed = True
 
-    old_dropdown_children = "children:[Te,De,ke,Me,Ne,Ie,Le,Re]"
-    new_dropdown_children = "children:[Te,De,ke,Me,(0,Q.jsx)(Da,{extension:!0,children:(0,Q.jsx)(Eo,{LeftIcon:So,onClick:()=>{o(!1),window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),250)},children:(0,Q.jsx)(Y,{id:`codex.profileDropdown.searchChats`,defaultMessage:`Search Chats`,description:`Menu item to search recent Codex chats`})})}),Ne,Ie,Le,Re]"
-    if "codex.profileDropdown.searchChats" not in text:
-        if old_dropdown_children not in text:
-            raise RuntimeError("Could not find profile dropdown children anchor")
-        text = text.replace(old_dropdown_children, new_dropdown_children, 1)
-        changed = True
-    else:
-        old_search_click = "onClick:()=>{o(!1),window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`))},children:(0,Q.jsx)(Y,{id:`codex.profileDropdown.searchChats`"
-        new_search_click = "onClick:()=>{o(!1),window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),0)},children:(0,Q.jsx)(Y,{id:`codex.profileDropdown.searchChats`"
-        if old_search_click in text:
-            text = text.replace(old_search_click, new_search_click, 1)
-            changed = True
-        old_search_click_zero = "onClick:()=>{o(!1),window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),0)},children:(0,Q.jsx)(Y,{id:`codex.profileDropdown.searchChats`"
-        new_search_click_delay = "onClick:()=>{o(!1),window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),250)},children:(0,Q.jsx)(Y,{id:`codex.profileDropdown.searchChats`"
-        if old_search_click_zero in text:
-            text = text.replace(old_search_click_zero, new_search_click_delay, 1)
-            changed = True
-        old_search_click_short_delay = "onClick:()=>{o(!1),window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),120)},children:(0,Q.jsx)(Y,{id:`codex.profileDropdown.searchChats`"
-        if old_search_click_short_delay in text:
-            text = text.replace(old_search_click_short_delay, new_search_click_delay, 1)
-            changed = True
-
     if changed:
-        write(local_thread, text)
+        write(recent_asset, text)
 
-    apps_asset = find_asset(extension_dir, "var Wx=new Map")
-    apps_text = read(apps_asset)
-    old_manage_tasks = "[`manageTasks`,()=>{I.dispatchHostMessage({type:`navigate-to-route`,path:`/automations`,state:{automationMode:`create`}})}]"
-    new_manage_tasks = "[`manageTasks`,()=>{window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),250)}]"
-    if old_manage_tasks in apps_text:
-        apps_text = apps_text.replace(old_manage_tasks, new_manage_tasks, 1)
-        write(apps_asset, apps_text)
-        changed = True
+    # ------------------------------------------------------------------
+    # Profile dropdown — usually in a different asset (history-*.js).
+    # Stable anchor: a JSX call constructing the keyboardShortcuts message.
+    # The plain literal `codex.profileDropdown.keyboardShortcuts` also
+    # appears in every locale translation file, so we discriminate by
+    # requiring the surrounding JSX call.
+    # ------------------------------------------------------------------
+    dropdown_asset = _find_asset_by_regex(
+        extension_dir,
+        rf"\(0,{JS_ID}\.jsx\)\({JS_ID},\{{id:`codex\.profileDropdown\.keyboardShortcuts`",
+    )
+    if dropdown_asset is None:
+        log(
+            "Note: profile dropdown asset (codex.profileDropdown.keyboardShortcuts) not found; skipping Search-Chats menu injection"
+        )
     else:
-        old_manage_tasks_immediate = (
-            "[`manageTasks`,()=>{window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`))}]"
-        )
-        if old_manage_tasks_immediate in apps_text:
-            apps_text = apps_text.replace(old_manage_tasks_immediate, new_manage_tasks, 1)
-            write(apps_asset, apps_text)
-            changed = True
-        else:
-            old_manage_tasks_zero = "[`manageTasks`,()=>{window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),0)}]"
-            if old_manage_tasks_zero in apps_text:
-                apps_text = apps_text.replace(old_manage_tasks_zero, new_manage_tasks, 1)
-                write(apps_asset, apps_text)
+        dt = read(dropdown_asset)
+        if "codex.profileDropdown.searchChats" not in dt:
+            dt2, dropdown_changed = _inject_search_chats_menu_item(dt)
+            if dropdown_changed:
+                write(dropdown_asset, dt2)
                 changed = True
-            else:
-                old_manage_tasks_short_delay = "[`manageTasks`,()=>{window.setTimeout(()=>window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),120)}]"
-                if old_manage_tasks_short_delay in apps_text:
-                    apps_text = apps_text.replace(old_manage_tasks_short_delay, new_manage_tasks, 1)
-                    write(apps_asset, apps_text)
-                    changed = True
-
-    try:
-        shortcuts_asset = find_asset_all(
-            extension_dir,
-            ('codex.command.manageTasks":{id:`codex.command.manageTasks`', "defaultMessage:`Manage automations`"),
-        )
-    except RuntimeError:
-        shortcuts_asset = None
-    if shortcuts_asset is not None:
-        shortcuts_text = read(shortcuts_asset)
-        old_manage_message = 'codex.command.manageTasks":{id:`codex.command.manageTasks`,defaultMessage:`Manage automations`,description:`Command menu item to manage automations`}'
-        new_manage_message = 'codex.command.manageTasks":{id:`codex.command.manageTasks`,defaultMessage:`Search Chats`,description:`Command menu item to search recent Codex chats`}'
-        if old_manage_message in shortcuts_text:
-            shortcuts_text = shortcuts_text.replace(old_manage_message, new_manage_message, 1)
-            write(shortcuts_asset, shortcuts_text)
-            changed = True
-
-    try:
-        descriptions_asset = find_asset_all(
-            extension_dir,
-            (
-                'codex.commandDescription.manageTasks":{id:`codex.commandDescription.manageTasks`',
-                "Create or manage automations from the current page",
-            ),
-        )
-    except RuntimeError:
-        descriptions_asset = None
-    if descriptions_asset is not None:
-        shortcuts_text = read(descriptions_asset)
-        old_manage_description = 'codex.commandDescription.manageTasks":{id:`codex.commandDescription.manageTasks`,defaultMessage:`Create or manage automations from the current page`,description:`Description for the Manage automations command`}'
-        new_manage_description = 'codex.commandDescription.manageTasks":{id:`codex.commandDescription.manageTasks`,defaultMessage:`Search recent Codex chats`,description:`Description for the Search Chats command`}'
-        if old_manage_description in shortcuts_text:
-            shortcuts_text = shortcuts_text.replace(old_manage_description, new_manage_description, 1)
-            write(descriptions_asset, shortcuts_text)
-            changed = True
-
-    for locale_asset in iter_webview_assets(extension_dir) or []:
-        locale_text = read(locale_asset)
-        updated = re.sub(r'("codex\.command\.manageTasks":)`[^`]*`', r"\1`Search Chats`", locale_text)
-        if updated != locale_text:
-            write(locale_asset, updated)
-            changed = True
+        else:
+            # Already has search-chats — try to normalize the click delay.
+            normalized = re.sub(
+                rf"(onClick:\(\)=>\{{[^}}]*?\(0,{JS_ID}\.jsx\)\({JS_ID},\{{id:`codex\.profileDropdown\.searchChats`)",
+                lambda m: m.group(0),  # passthrough; below handles delay
+                dt,
+            )
+            normalized, dn = re.subn(
+                r"(window\.setTimeout\(\(\)=>window\.dispatchEvent\(new CustomEvent\(`open-recent-tasks-menu`\)\)),\s*\d+\)",
+                r"\g<1>,250)",
+                normalized,
+            )
+            if dn:
+                write(dropdown_asset, normalized)
+                changed = True
 
     return changed
+
+
+def _inject_search_chats_menu_item(text: str) -> tuple[str, bool]:
+    """Inject a Search-Chats item into the profile dropdown children array.
+
+    Re-uses components and aliases discovered from the existing
+    `keyboardShortcuts` menu entry so we don't have to know any
+    minified identifiers up front.
+    """
+    # The most reliable anchor is the existing keyboardShortcuts menu item:
+    # it's right next to where we want to inject, and the surrounding code
+    # tells us the JSX alias, the wrapper/item components, an icon, AND the
+    # dropdown's close-state setter (captured from its onClick handler).
+    #
+    # Pattern: `(<setter>(!1), ae.dispatchMessage(\`open-keyboard-shortcuts\`,...)`
+    # — every menu item shares the same close-setter, so we capture it here.
+    close_setter_probe = re.search(
+        rf"\(\)=>\{{(?P<setter>{JS_ID})\(!1\),{JS_ID}\.dispatchMessage\(`open-keyboard-shortcuts`",
+        text,
+    )
+    if close_setter_probe is None:
+        return text, False
+    close_setter = close_setter_probe.group("setter")
+
+    # Probe the keyboardShortcuts JSX call to discover the jsx alias, the
+    # wrapper component, the menu-item component, and an icon.
+    probe = re.search(
+        rf"\(0,(?P<jsx>{JS_ID})\.jsx\)\((?P<wrap>{JS_ID}),\{{extension:!0,"
+        rf"children:\(0,(?P=jsx)\.jsx\)\((?P<item>{JS_ID}),\{{LeftIcon:(?P<icon>{JS_ID}),"
+        rf"onClick:{JS_ID},children:{JS_ID}\}}\)\}}\)",
+        text,
+    )
+    if probe is None:
+        probe = re.search(
+            rf"\(0,(?P<jsx>{JS_ID})\.jsx\)\((?P<wrap>{JS_ID}),\{{"
+            rf"children:\(0,(?P=jsx)\.jsx\)\((?P<item>{JS_ID}),\{{LeftIcon:(?P<icon>{JS_ID}),"
+            rf"onClick:{JS_ID},children:{JS_ID}\}}\)\}}\)",
+            text,
+        )
+    if probe is None:
+        return text, False
+    jsx_ns = probe.group("jsx")
+    wrap = probe.group("wrap")
+    item = probe.group("item")
+    icon = probe.group("icon")
+
+    # Locate the intl-message component by finding a sibling profile-dropdown
+    # message id.
+    msg_probe = re.search(
+        rf"\(0,{re.escape(jsx_ns)}\.jsx\)\((?P<msg>{JS_ID}),\{{id:`codex\.profileDropdown\.",
+        text,
+    )
+    if msg_probe is None:
+        return text, False
+    msg = msg_probe.group("msg")
+
+    # Locate the children array of the profile dropdown — the one within
+    # ~4KB of the keyboardShortcuts message.
+    children_re = re.compile(
+        rf"children:\[(?P<c1>{JS_ID}),(?P<c2>{JS_ID}),(?P<c3>{JS_ID}),(?P<c4>{JS_ID}),"
+        rf"(?P<c5>{JS_ID}),(?P<c6>{JS_ID}),(?P<c7>{JS_ID}),(?P<c8>{JS_ID})\]"
+    )
+    target = None
+    for m in children_re.finditer(text):
+        start = max(0, m.start() - 4000)
+        if "codex.profileDropdown.keyboardShortcuts" in text[start : m.end()]:
+            target = m
+            break
+    if target is None:
+        return text, False
+
+    children = [target.group(f"c{i}") for i in range(1, 9)]
+    search_chat_jsx = (
+        f"(0,{jsx_ns}.jsx)({wrap},{{extension:!0,children:(0,{jsx_ns}.jsx)({item},"
+        f"{{LeftIcon:{icon},onClick:()=>{{{close_setter}(!1),window.setTimeout(()=>"
+        f"window.dispatchEvent(new CustomEvent(`open-recent-tasks-menu`)),250)}},"
+        f"children:(0,{jsx_ns}.jsx)({msg},{{id:`codex.profileDropdown.searchChats`,"
+        f"defaultMessage:`Search Chats`,description:`Menu item to search recent Codex chats`}})}})}})"
+    )
+    new_children = ",".join(children[:4] + [search_chat_jsx] + children[4:])
+    text = text[: target.start()] + f"children:[{new_children}]" + text[target.end() :]
+    return text, True
 
 
 WORKSPACE_GROUP_HELPER_JS = r"""function codexPatchWorkspacePath(e){return typeof e=="string"&&e.trim()?e.trim():null}
@@ -497,84 +1115,210 @@ function codexPatchGroupTasks(e,t,n){return codexPatchTaskGroups(e).map(e=>(0,Q.
 """
 
 
+def _resolve_jsx_alias(text: str) -> str:
+    """Discover the local JSX namespace alias used in a webview asset.
+
+    Looks for `var <ns>=<importedJsx>();` near the top. Falls back to "Q".
+    """
+    # Look for the canonical pattern: `var <ns2>=<jsx_runtime>(),<jsx_ns>=<jsx_runtime2>();`
+    m = re.search(rf"var\s+{JS_ID}=[A-Za-z_$][\w$]*\(\),(?P<jsx>{JS_ID})=[A-Za-z_$][\w$]*\(\);", text)
+    if m:
+        return m.group("jsx")
+    m = re.search(rf"var\s+(?P<jsx>{JS_ID})=[A-Za-z_$][\w$]*\(\);", text)
+    if m:
+        return m.group("jsx")
+    return "Q"
+
+
 def patch_workspace_groups(extension_dir: Path) -> bool:
-    local_thread = find_asset_all(
-        extension_dir,
-        ("function xu(e){", "codex.recentTasksMenu.errorCloud.inline", "function Su(e){"),
-    )
-    text = read(local_thread)
+    # Stable anchor: the `.map(...)` call producing recent-task rows OR, once
+    # the patcher has run, the `codexPatchGroupTasks(...)` substitution. We
+    # accept either so the patch is idempotent.
+    row_map_re = rf"{JS_ID}\.map\(e=>\(0,{JS_ID}\.jsx\)\({JS_ID},\{{item:e,isActive:e\.kind===`local`&&{JS_ID}===e\.conversation\.id,onClose:{JS_ID}\}},e\.key\)\)"
+    recent_asset = _find_asset_by_regex(extension_dir, row_map_re)
+    if recent_asset is None:
+        recent_asset = _find_asset_by_regex(
+            extension_dir,
+            rf"codexPatchGroupTasks\({JS_ID},{JS_ID},{JS_ID}\)",
+        )
+    if recent_asset is None:
+        raise RuntimeError(
+            "Could not find workspace-grouping asset (recent-tasks row .map or codexPatchGroupTasks anchor)"
+        )
+    text = read(recent_asset)
     changed = False
 
-    helper_start = text.find("function codexPatchWorkspacePath(")
-    if helper_start != -1:
-        helper_end = text.find("function xu(e){", helper_start)
-        if helper_end == -1:
-            raise RuntimeError("Could not find end of workspace grouping helper")
-        current_helper = text[helper_start:helper_end]
-        if current_helper != WORKSPACE_GROUP_HELPER_JS:
-            text = text[:helper_start] + WORKSPACE_GROUP_HELPER_JS + text[helper_end:]
+    # Discover the row-component identifier from the original `.map` call.
+    # The helper template hard-codes a name that changes between builds
+    # (`wu` in the old build, `Ke` here), so we resolve it dynamically.
+    m_probe = re.compile(
+        rf"{JS_ID}\.map\(e=>\(0,(?P<jsx>{JS_ID})\.jsx\)\((?P<rowComp>{JS_ID}),"
+        rf"\{{item:e,isActive:e\.kind===`local`&&{JS_ID}===e\.conversation\.id,"
+        rf"onClose:{JS_ID}\}},e\.key\)\)"
+    ).search(text)
+    if m_probe is not None:
+        row_component = m_probe.group("rowComp")
+    else:
+        # Patcher already ran. Recover the row component from the existing
+        # helper body so a re-run doesn't change behavior.
+        m_existing = re.search(
+            rf"function codexPatchGroupTasks\([^)]+\)\{{[^}}]*?\(0,(?P<jsx>{JS_ID})\.jsx\)\((?P<rowComp>{JS_ID}),\{{item:",
+            text,
+            re.DOTALL,
+        )
+        if m_existing is None:
+            raise RuntimeError("Could not resolve row-component identifier for workspace groups")
+        row_component = m_existing.group("rowComp")
+
+    # The helper template hard-codes `Q.jsx`/`Q.jsxs` and the row component
+    # `wu`. Both vary per build, so substitute the discovered identifiers.
+    jsx_alias = _resolve_jsx_alias(text)
+    helper_src = WORKSPACE_GROUP_HELPER_JS
+    if jsx_alias != "Q":
+        helper_src = (
+            helper_src.replace("Q.jsx", f"{jsx_alias}.jsx")
+            .replace("Q.jsxs", f"{jsx_alias}.jsxs")
+            .replace("Q.Fragment", f"{jsx_alias}.Fragment")
+        )
+    if row_component != "wu":
+        helper_src = helper_src.replace("(wu,{item:e,", f"({row_component},{{item:e,")
+
+    # Inject (or re-inject) the helper just after the file's `var <ns>=...();`
+    # decl block, where the jsx alias becomes valid.
+    existing_start = text.find("function codexPatchWorkspacePath(")
+    if existing_start != -1:
+        # Find end of existing helper: last `codexPatchGroupTasks(` close brace.
+        # The helper ends with the closing `};` of codexPatchGroupTasks. Look
+        # for the next non-helper code (any function that isn't codexPatch*).
+        m_end = re.search(
+            rf"function\s+(?!codexPatch){JS_ID}\(",
+            text[existing_start:],
+        )
+        if m_end is None:
+            raise RuntimeError("Could not bracket existing workspace grouping helper for replacement")
+        existing_end = existing_start + m_end.start()
+        if text[existing_start:existing_end] != helper_src:
+            text = text[:existing_start] + helper_src + text[existing_end:]
             changed = True
     else:
-        anchor = "function xu(e){"
-        if anchor not in text:
-            raise RuntimeError("Could not find recent tasks menu anchor")
-        text = text.replace(anchor, WORKSPACE_GROUP_HELPER_JS + anchor, 1)
+        # Find injection point: right after the last top-level `var ... ();`
+        # declaration block. As a robust fallback, inject before the FIRST
+        # non-IIFE `function <name>(` that follows the imports / var block.
+        # The safest place is after the var decl that introduces the jsx alias.
+        m_decl = re.search(rf"var\s+(?:{JS_ID}=[A-Za-z_$][\w$]*\(\),)*{JS_ID}=[A-Za-z_$][\w$]*\(\);", text)
+        if m_decl is None:
+            # Fallback: inject after final import statement.
+            last_import_end = 0
+            i = 0
+            while i < len(text) and text[i : i + 7] == "import{" or text[i : i + 7] == "import ":
+                semi = text.find(";", i)
+                if semi == -1:
+                    break
+                last_import_end = semi + 1
+                i = semi + 1
+                if not text[i : i + 6].startswith("import"):
+                    break
+            insert_at = last_import_end
+        else:
+            insert_at = m_decl.end()
+        text = text[:insert_at] + helper_src + text[insert_at:]
         changed = True
 
-    old_recent_map = "D.map(e=>(0,Q.jsx)(wu,{item:e,isActive:e.kind===`local`&&f===e.conversation.id,onClose:i},e.key))"
-    new_recent_map = "codexPatchGroupTasks(D,f,i)"
-    if old_recent_map in text:
-        text = text.replace(old_recent_map, new_recent_map, 1)
+    # Replace the recent-tasks .map with codexPatchGroupTasks(list, active, onClose).
+    row_re = re.compile(
+        rf"(?P<list>{JS_ID})\.map\(e=>\(0,(?P<jsx>{JS_ID})\.jsx\)\({JS_ID},"
+        rf"\{{item:e,isActive:e\.kind===`local`&&(?P<active>{JS_ID})===e\.conversation\.id,"
+        rf"onClose:(?P<onClose>{JS_ID})\}},e\.key\)\)"
+    )
+    m_row = row_re.search(text)
+    if m_row and "codexPatchGroupTasks(" not in text[m_row.start() : m_row.end()]:
+        replacement = f"codexPatchGroupTasks({m_row.group('list')},{m_row.group('active')},{m_row.group('onClose')})"
+        text = text[: m_row.start()] + replacement + text[m_row.end() :]
         changed = True
 
-    old_inline_map = "d=l.map(e),t[8]=o,"
-    new_inline_map = "d=codexPatchGroupInlineTasks(l,e),t[8]=o,"
-    if old_inline_map in text:
-        text = text.replace(old_inline_map, new_inline_map, 1)
+    # Replace the inline-map: `<out>=<list>.map(e),t[8]=<v>,`
+    inline_re = re.compile(rf"(?P<out>{JS_ID})=(?P<list>{JS_ID})\.map\(e\),t\[8\]=(?P<v0>{JS_ID}),")
+    m_inline = inline_re.search(text)
+    if m_inline:
+        replacement = (
+            f"{m_inline.group('out')}=codexPatchGroupInlineTasks({m_inline.group('list')},e),"
+            f"t[8]={m_inline.group('v0')},"
+        )
+        text = text[: m_inline.start()] + replacement + text[m_inline.end() :]
         changed = True
 
-    old_inline_group_class = "className:`group/inline -mx-[var(--padding-row-x)] flex flex-col gap-px rounded-xl pb-1 transition-colors`"
+    old_inline_group_class = (
+        "className:`group/inline -mx-[var(--padding-row-x)] flex flex-col gap-px rounded-xl pb-1 transition-colors`"
+    )
     new_inline_group_class = "className:`group/inline -mx-[var(--padding-row-x)] max-w-full overflow-x-hidden flex flex-col gap-px rounded-xl pb-1 transition-colors`"
     if old_inline_group_class in text:
         text = text.replace(old_inline_group_class, new_inline_group_class, 1)
         changed = True
 
     if changed:
-        write(local_thread, text)
+        write(recent_asset, text)
     return changed
 
 
 def patch_pin_composer(extension_dir: Path) -> bool:
     changed = False
 
-    local_thread = find_asset_all(
-        extension_dir,
-        ("function Ql(e){", "(0,Q.jsx)(Ql,{tasksQuery:f,mergedTasks:m})", "function ju(e)"),
+    # The inline-tasks wrapper lives in the same asset that owns the recent-
+    # tasks menu / workspace grouping. Stable anchor: the tasksQuery+mergedTasks
+    # JSX call.
+    inline_re_str = (
+        rf"\(0,(?P<jsx>{JS_ID})\.jsx\)\((?P<tasksComp>{JS_ID}),"
+        rf"\{{tasksQuery:(?P<tq>{JS_ID}),mergedTasks:(?P<mt>{JS_ID})\}}\)"
     )
-    text = read(local_thread)
-    new_inline_tasks = 'S=c&&(0,Q.jsx)(`div`,{className:`overscroll-contain pr-1`,style:{maxHeight:"calc(100vh - 320px)",overflowY:"auto",overflowX:"hidden",scrollbarGutter:"stable"},onWheel:e=>{e.currentTarget.scrollTop+=e.deltaY,e.stopPropagation()},children:(0,Q.jsx)(Ql,{tasksQuery:f,mergedTasks:m})})'
-    old_inline_task_variants = [
-        "S=c&&(0,Q.jsx)(`div`,{children:(0,Q.jsx)(Ql,{tasksQuery:f,mergedTasks:m})})",
-        "S=c&&(0,Q.jsx)(`div`,{className:`max-h-[calc(100vh-220px)] overflow-y-auto overscroll-contain pr-1`,children:(0,Q.jsx)(Ql,{tasksQuery:f,mergedTasks:m})})",
-        'S=c&&(0,Q.jsx)(`div`,{className:`overscroll-contain pr-1`,style:{maxHeight:"calc(100vh - 320px)",overflowY:"auto",scrollbarGutter:"stable"},onWheel:e=>{e.currentTarget.scrollTop+=e.deltaY,e.stopPropagation()},children:(0,Q.jsx)(Ql,{tasksQuery:f,mergedTasks:m})})',
-    ]
-    for old_inline_tasks in old_inline_task_variants:
-        if old_inline_tasks in text:
-            text = text.replace(old_inline_tasks, new_inline_tasks, 1)
-            write(local_thread, text)
-            changed = True
-            break
-    if new_inline_tasks not in text and "onWheel:e=>{e.currentTarget.scrollTop+=e.deltaY" not in text:
-        raise RuntimeError("Could not find inline task list container anchor")
-    if changed:
-        write(local_thread, text)
+    inline_asset = _find_asset_by_regex(extension_dir, inline_re_str)
+    if inline_asset is None:
+        raise RuntimeError("Could not find inline-tasks JSX (tasksQuery/mergedTasks)")
+    text = read(inline_asset)
 
-    new_thread_page = find_asset_all(
-        extension_dir,
-        ("NewThreadPanelPage", "thread-footer-overlap", "homePage.mainContent"),
+    # The wrapper just before that JSX call looks like:
+    #   <S>=<c>&&(0,<jsx>.jsx)(`div`,{...children:(0,<jsx>.jsx)(<tasksComp>,{tasksQuery:<tq>,mergedTasks:<mt>})})
+    # We replace the whole `<S>=<c>&&...` expression so we don't have to know
+    # whatever the existing className/style happens to be (some prior patcher
+    # runs may have already mutated it).
+    wrapper_re = re.compile(
+        rf"(?P<sVar>{JS_ID})=(?P<cVar>{JS_ID})&&\(0,(?P<jsx>{JS_ID})\.jsx\)\(`div`,\{{"
+        rf"(?:[^{{}}]|\{{[^{{}}]*\}})*?"
+        rf"children:\(0,(?P=jsx)\.jsx\)\((?P<tasksComp>{JS_ID}),"
+        rf"\{{tasksQuery:(?P<tq>{JS_ID}),mergedTasks:(?P<mt>{JS_ID})\}}\)\}}\)"
     )
+    m_wrap = wrapper_re.search(text)
+    if m_wrap is None:
+        raise RuntimeError("Could not find inline-tasks wrapper around tasksQuery JSX call")
+    new_wrapper = (
+        f"{m_wrap.group('sVar')}={m_wrap.group('cVar')}&&(0,{m_wrap.group('jsx')}.jsx)(`div`,"
+        f"{{className:`overscroll-contain pr-1`,style:"
+        f'{{maxHeight:"calc(100vh - 320px)",overflowY:"auto",overflowX:"hidden",scrollbarGutter:"stable"}},'
+        f"onWheel:e=>{{e.currentTarget.scrollTop+=e.deltaY,e.stopPropagation()}},"
+        f"children:(0,{m_wrap.group('jsx')}.jsx)({m_wrap.group('tasksComp')},"
+        f"{{tasksQuery:{m_wrap.group('tq')},mergedTasks:{m_wrap.group('mt')}}})}})"
+    )
+    if m_wrap.group(0) != new_wrapper:
+        text = text[: m_wrap.start()] + new_wrapper + text[m_wrap.end() :]
+        write(inline_asset, text)
+        changed = True
+
+    # Sticky composer footer. Stable anchors: NewThreadPanelPage identifier +
+    # thread-footer-overlap class + homePage.mainContent literal. Multiple
+    # assets carry only one of these (e.g. app-main has thread-footer-overlap
+    # too), so we require all three.
+    new_thread_page = None
+    for path in iter_webview_assets(extension_dir) or []:
+        text_probe = read(path)
+        if all(
+            token in text_probe for token in ("NewThreadPanelPage", "thread-footer-overlap", "homePage.mainContent")
+        ):
+            new_thread_page = path
+            break
+    if new_thread_page is None:
+        raise RuntimeError(
+            "Could not find new-thread-panel asset (NewThreadPanelPage + thread-footer-overlap + homePage.mainContent)"
+        )
     text = read(new_thread_page)
-    old_footer_class = "z-10 -mt-[var(--thread-footer-overlap)] flex flex-col gap-2 pb-2"
     new_footer_class = "sticky bottom-0 z-10 -mt-[var(--thread-footer-overlap)] flex flex-col gap-2 pb-2"
     normalized = re.sub(
         r"(?:sticky bottom-0 )+z-10 -mt-\[var\(--thread-footer-overlap\)\] flex flex-col gap-2 pb-2",
@@ -586,11 +1330,57 @@ def patch_pin_composer(extension_dir: Path) -> bool:
         text = normalized
         write(new_thread_page, text)
         changed = True
-    elif old_footer_class in text and new_footer_class not in text:
-        text = text.replace(old_footer_class, new_footer_class, 1)
-        write(new_thread_page, text)
-        changed = True
 
+    return changed
+
+
+WEBVIEW_CACHE_BUST_MARKERS = (
+    "__codexTaskContextBridgeV5",
+    "__codexPostMessage",
+    "__codexTaskContextResponderV1",
+    "dataAttributes:codexRenameContext",
+    "codex.profileDropdown.searchChats",
+    "codexPatchCollapsedWorkspaces",
+    "codexPatchGroupInlineTasks",
+    "sticky bottom-0 z-10 -mt-[var(--thread-footer-overlap)]",
+    'overflowX:"hidden"',
+)
+
+
+def cache_bust_patched_webview_assets(extension_dir: Path) -> bool:
+    """Rename patched webview chunks so VS Code's webview SW cannot serve stale JS."""
+    webview_dir = extension_dir / "webview"
+    assets_dir = webview_dir / "assets"
+    if not assets_dir.exists():
+        return False
+
+    changed = False
+    targets: list[Path] = []
+    for path in assets_dir.glob("*.js"):
+        if "-codexpatch" in path.stem:
+            continue
+        text = read(path)
+        if any(marker in text for marker in WEBVIEW_CACHE_BUST_MARKERS):
+            targets.append(path)
+
+    for old_path in targets:
+        if not old_path.exists():
+            continue
+        new_name = f"{old_path.stem}-codexpatch{old_path.suffix}"
+        new_path = old_path.with_name(new_name)
+        if new_path.exists():
+            new_path.unlink()
+        old_name = old_path.name
+        old_path.rename(new_path)
+        for ref_path in webview_dir.rglob("*"):
+            if not ref_path.is_file() or ref_path.suffix.lower() not in {".html", ".js", ".css"}:
+                continue
+            text = read(ref_path)
+            if old_name not in text:
+                continue
+            write(ref_path, text.replace(old_name, new_name))
+        log(f"Cache-busted webview asset: {old_name} -> {new_name}")
+        changed = True
     return changed
 
 
@@ -626,28 +1416,64 @@ def verify_extension_dir(extension_dir: Path, patches: set[str]) -> None:
     extension_text = read(extension_js)
     webview_text = "\n".join(read(path) for path in iter_webview_assets(extension_dir) or [])
     checks: list[tuple[str, bool]] = []
+    webview_when = "(webviewId == 'chatgpt.sidebarView' || webviewId == 'chatgpt.sidebarSecondaryView') && codexTask == true"
 
     if PATCH_RENAME in patches:
         commands = package.get("contributes", {}).get("commands", [])
         checks += [
             ("rename command contribution", any(command.get("command") == COMMAND_ID for command in commands)),
             ("pin command contribution", any(command.get("command") == PIN_COMMAND_ID for command in commands)),
+            ("unpin command contribution", any(command.get("command") == UNPIN_COMMAND_ID for command in commands)),
             ("star command contribution", any(command.get("command") == STAR_COMMAND_ID for command in commands)),
+            ("unstar command contribution", any(command.get("command") == UNSTAR_COMMAND_ID for command in commands)),
+            (
+                "rename webview context menu",
+                any(
+                    item.get("command") == COMMAND_ID and item.get("when") == webview_when
+                    for item in package.get("contributes", {}).get("menus", {}).get("webview/context", [])
+                ),
+            ),
             ("rename command registration", 'registerCommand("chatgpt.renameTask"' in extension_text),
             ("pin command registration", 'registerCommand("chatgpt.pinTask"' in extension_text),
+            ("unpin command registration", 'registerCommand("chatgpt.unpinTask"' in extension_text),
             ("star command registration", 'registerCommand("chatgpt.starTask"' in extension_text),
+            ("unstar command registration", 'registerCommand("chatgpt.unstarTask"' in extension_text),
+            ("task context message handler", 'case"codex-task-context"' in extension_text),
+            ("task context response handler", 'case"codex-task-context-response"' in extension_text),
+            ("last task context fallback", "codexRememberTaskContext" in extension_text),
+            ("command task context request", "codexWithTaskContext" in extension_text),
             ("live thread/name/set route", '"thread/name/set"' in extension_text),
-            ("task row context data", "data-vscode-context" in webview_text and "codexThreadId:" in webview_text),
+            ("task row context data", "data-vscode-context" in webview_text and "codexTask:!0" in webview_text),
+            ("task row direct context", "dataAttributes:codexRenameContext" in webview_text),
+            ("task row pin/star state", "codexPinned" in webview_text and "codexStarred" in webview_text),
+            ("task row context bridge", "__codexTaskContextBridgeV5" in webview_text),
+            ("webview postMessage bridge", "__codexPostMessage" in webview_text),
+            ("webview task context responder", "__codexTaskContextResponderV1" in webview_text),
         ]
     if PATCH_RECENT_MENU in patches:
         checks.append(("Search Chats menu item", "codex.profileDropdown.searchChats" in webview_text))
     if PATCH_WORKSPACE_GROUPS in patches:
         checks.append(("workspace grouping", "codexPatchCollapsedWorkspaces" in webview_text))
         checks.append(("pinned task sorting", "codexPatchIsPinned" in webview_text))
-        checks.append(("inline workspace grouping hook", "codexPatchGroupInlineTasks(l,e)" in webview_text))
-        checks.append(("search workspace grouping hook", "codexPatchGroupTasks(D,f,i)" in webview_text))
+        checks.append(
+            (
+                "inline workspace grouping hook",
+                bool(re.search(rf"codexPatchGroupInlineTasks\({JS_ID},e\)", webview_text)),
+            )
+        )
+        checks.append(
+            (
+                "search workspace grouping hook",
+                bool(re.search(rf"codexPatchGroupTasks\({JS_ID},{JS_ID},{JS_ID}\)", webview_text)),
+            )
+        )
     if PATCH_PIN_COMPOSER in patches:
-        checks.append(("pinned composer / no horizontal overflow", "sticky bottom-0" in webview_text and 'overflowX:"hidden"' in webview_text))
+        checks.append(
+            (
+                "pinned composer / no horizontal overflow",
+                "sticky bottom-0" in webview_text and 'overflowX:"hidden"' in webview_text,
+            )
+        )
 
     missing = [label for label, ok in checks if not ok]
     if missing:
@@ -686,6 +1512,7 @@ def patch_extension_dir(extension_dir: Path, patches: set[str]) -> bool:
         except Exception as exc:
             log(f"Patch failed: {patch}: {exc}")
             raise RuntimeError(f"{patch} patch failed: {exc}") from exc
+    changed |= cache_bust_patched_webview_assets(extension_dir)
     return changed
 
 

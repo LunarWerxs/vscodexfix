@@ -1,85 +1,103 @@
-# VSCode Codex Extension Improvement's Patch
+# vscodexfix
 
-> Current version: **v0.1.0**
+**Make the Codex task list usable.**
 
-A post-build patcher for the **ChatGPT / Codex VS Code extension** that fixes the cramped task-list ergonomics — adds right-click task actions, an inline expanded task list that uses the whole sidebar, workspace grouping with collapsible headers, a *Search Chats* entry in the profile menu, a sticky composer, and several layout fixes.
+The stock ChatGPT / Codex VS Code extension buries every task behind a tiny `View all` flyout, hides recent-chat search, and won't let you rename, pin, or star anything from the sidebar. This fixes all of that — and groups your tasks by workspace while it's at it.
 
-This is a community patch, not an official OpenAI project. It edits the installed extension's bundled `out/extension.js` and webview assets in place (or a downloaded `.vsix`).
+> Current release: **v0.1.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
 
-> **Sister project:** [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) — the same idea for the **Anthropic Claude Code** VS Code extension (persistent session pane, pin/star, status indicators).
+---
 
-## What it does
-
-- **Right-click task actions** — `Rename Task`, `Pin Task`, `Star Task` on every task row, contributed through the standard VS Code webview context menu.
-- **Live rename** — renaming updates the visible sidebar without reloading the webview or interrupting active Codex tasks.
-- **Pin / Star** — pinned tasks sort to the top of their workspace group; starred tasks are visibly marked. State is persisted in extension storage where possible (title-prefix fallback otherwise).
-- **Expanded inline task list** — replaces the cramped `View all` flyout. The task list now uses the available sidebar height.
-- **Search Chats in the profile menu** — moves recent-chat search out of the small flyout. Opens reliably and doesn't flash closed on the click that opened it.
-- **Sticky composer** — the new-chat input stays pinned to the bottom while the task list scrolls above it.
-- **Workspace grouping** — tasks are grouped by workspace / project with collapsible headers, derived from stable metadata (not hardcoded local paths).
-- **No more horizontal scrollbar** — long task titles and workspace labels ellipsize cleanly.
-
-See [CODEX_EXTENSION_FEEDBACK.md](CODEX_EXTENSION_FEEDBACK.md) for the full feature spec sent to the Codex team.
-
-## Requirements
-
-- Python 3.9+
-- Node.js (optional — used for a `node --check` syntax pass after patching; the patch still applies if Node is missing)
-- The ChatGPT / Codex extension installed in VS Code (`openai.chatgpt`)
-
-## Usage
+## Install
 
 ```bash
-# Download + patch the latest from the Marketplace, write a patched .vsix
 python patch_codex_vsix_rename.py
-
-# Or pass an explicit Marketplace itemName / Marketplace URL / local .vsix path
-python patch_codex_vsix_rename.py openai.chatgpt
-python patch_codex_vsix_rename.py "https://marketplace.visualstudio.com/items?itemName=openai.chatgpt"
-python patch_codex_vsix_rename.py ./openai.chatgpt-X.Y.Z.vsix
-
-# Apply only specific patches
-python patch_codex_vsix_rename.py --patches rename,pin-composer
-
-# Install the patched VSIX automatically (uses code --install-extension)
-python patch_codex_vsix_rename.py --install
-
-# Print patcher version
-python patch_codex_vsix_rename.py --patcher-version
 ```
 
-Available patch names for `--patches`:
+Downloads the latest Codex VSIX from the Marketplace, patches it, writes `*.tasks-patched.vsix`. Install via **Extensions → "…" → Install from VSIX…** and reload.
 
-- `rename` — task row context data + `Rename Task` / `Pin Task` / `Star Task` commands and live-refresh wiring.
-- `recent-menu` — moves recent-chat search into the profile menu as `Search Chats`.
-- `workspace-groups` — workspace grouping with collapsible headers + horizontal-overflow fixes.
-- `pin-composer` — sticks the new-chat composer to the bottom of the sidebar.
+Want it done for you? Add `--install` and the script hands the VSIX off to `code --install-extension`.
 
-Default is `all`.
+**Requires:** Python 3.9+. Node.js is optional (used for a post-patch syntax check).
 
-After patching, install the resulting `*.tasks-patched.vsix` via **Extensions → "..." menu → Install from VSIX...** (or use `--install`), then reload the VS Code window.
+---
+
+## What you get
+
+#### Right-click any task
+
+`Rename Task`, `Pin Task`, `Star Task` — all from the standard VS Code context menu, all live. Rename updates the sidebar in place without reloading the webview or interrupting whichever task is actively running.
+
+#### Pin / Star with workspace-aware sorting
+
+Pinned tasks float to the top of their workspace group (not the top of every workspace combined). Starred tasks are visibly marked. State persists in extension storage where possible, with a title-prefix fallback when the bundle won't cooperate.
+
+#### Real task list, real sidebar
+
+The cramped `View all` flyout is gone. The task list now uses the full sidebar height, with workspace groups and collapsible headers derived from stable metadata — not hardcoded local paths.
+
+#### Sticky composer, no sideways scroll
+
+New-chat input stays pinned to the bottom while the task list scrolls above it. Long titles and workspace labels ellipsize cleanly instead of forcing a horizontal scrollbar.
+
+#### Search Chats moved where it belongs
+
+Recent-chat search lives in the profile menu now, next to Codex Settings. Opens reliably — no more flashing closed on the click that opened it.
+
+---
+
+## Each patch is independent
+
+The patcher splits into four feature patches so a single broken anchor in a new bundle doesn't take the whole run down with it:
+
+| Patch | What it does |
+| --- | --- |
+| `rename` | Right-click rename / pin / star + live refresh |
+| `recent-menu` | Moves recent-chat search into the profile menu |
+| `workspace-groups` | Grouping, collapsible headers, overflow fixes |
+| `pin-composer` | Sticks the new-chat composer to the bottom |
+
+```bash
+# Apply only what you want
+python patch_codex_vsix_rename.py --patches rename,pin-composer
+```
+
+---
 
 ## Rollback
 
-Uninstall the patched VSIX and reinstall the stock extension from the Marketplace.
+Uninstall the patched VSIX, reinstall the stock extension from the Marketplace.
 
-## Version compatibility
+## Compatibility
 
-The patch script anchors on specific identifiers and structural patterns in the bundled `out/extension.js`. The Codex extension ships new bundles regularly and those anchors can shift without notice. If a patch step raises a "could not find anchor" / "missing marker" error, the bundle has shifted and the anchor needs updating.
+The script anchors on identifiers and structural patterns in `out/extension.js`. The Codex extension ships new bundles regularly. If a patch step errors with *"could not find anchor"* the bundle has shifted — open an issue with the version and which step failed (the log next to the script points right at it).
 
-If the patch fails on a newer version, please open an issue with the extension version and which patch step failed (the log file written next to the patcher output points at the culprit).
+---
 
-## Why a runtime patch instead of a fork
+## Power-user usage
 
-The Codex extension is closed-source. The bundled VSIX is the only artifact available to modify. The patch is intentionally split into independently-toggleable feature patches so a single broken anchor doesn't take down the whole run — you can disable a failing patch via `--patches` while the others still apply.
+```bash
+# Specific marketplace item / URL / local VSIX
+python patch_codex_vsix_rename.py openai.chatgpt
+python patch_codex_vsix_rename.py ./openai.chatgpt-X.Y.Z.vsix
 
-The goal is for the Codex team to eventually implement these ergonomics natively; until then this fills the gap.
+# Custom output path
+python patch_codex_vsix_rename.py --out ./codex.patched.vsix
+
+# Skip the post-patch verification pass
+python patch_codex_vsix_rename.py --no-verify
+
+# Version
+python patch_codex_vsix_rename.py --patcher-version
+```
+
+The full feature spec sent to the Codex team lives in [CODEX_EXTENSION_FEEDBACK.md](CODEX_EXTENSION_FEEDBACK.md) if you want the long version.
+
+---
 
 ## Changelog
 
-### v0.1.0
-
-- Initial public release: right-click rename / pin / star, live rename without reload, expanded inline task list, workspace grouping with collapsible headers, sticky composer, `Search Chats` in profile menu, horizontal overflow fixes.
+**v0.1.0** — First release: right-click rename / pin / star with live refresh, expanded inline task list, workspace grouping with collapsible headers, sticky composer, `Search Chats` in profile menu, horizontal-overflow fixes.
 
 ## License
 

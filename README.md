@@ -4,7 +4,7 @@
 
 The stock ChatGPT / Codex VS Code extension buries every task behind a tiny `View all` flyout, hides recent-chat search, and won't let you rename, pin, or star anything from the sidebar. This fixes all of that — and groups your tasks by workspace while it's at it.
 
-> Current release: **v0.1.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
+> Current release: **v0.2.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
 
 ---
 
@@ -14,11 +14,11 @@ The stock ChatGPT / Codex VS Code extension buries every task behind a tiny `Vie
 python patch_codex_vsix_rename.py
 ```
 
-Downloads the latest Codex VSIX from the Marketplace, patches it, writes `*.tasks-patched.vsix`. Install via **Extensions → "…" → Install from VSIX…** and reload.
+That's it. The script downloads the latest Codex extension from the Marketplace, patches it, and installs the patched version via `code --install-extension`. Reload the VS Code window when it's done.
 
-Want it done for you? Add `--install` and the script hands the VSIX off to `code --install-extension`.
+Pass `--vsix-only` if you'd rather inspect the patched `.vsix` before installing it yourself.
 
-**Requires:** Python 3.9+. Node.js is optional (used for a post-patch syntax check).
+**Requires:** Python 3.9+, the `code` CLI on PATH (ships with VS Code). Node.js optional (used for a post-patch syntax check).
 
 ---
 
@@ -50,12 +50,12 @@ Recent-chat search lives in the profile menu now, next to Codex Settings. Opens 
 
 The patcher splits into four feature patches so a single broken anchor in a new bundle doesn't take the whole run down with it:
 
-| Patch | What it does |
-| --- | --- |
-| `rename` | Right-click rename / pin / star + live refresh |
-| `recent-menu` | Moves recent-chat search into the profile menu |
-| `workspace-groups` | Grouping, collapsible headers, overflow fixes |
-| `pin-composer` | Sticks the new-chat composer to the bottom |
+| Patch              | What it does                                          |
+| ------------------ | ----------------------------------------------------- |
+| `rename`           | Right-click rename / pin / star + live refresh        |
+| `recent-menu`      | Moves recent-chat search into the profile menu        |
+| `workspace-groups` | Grouping, collapsible headers, overflow fixes         |
+| `pin-composer`     | Sticks the new-chat composer to the bottom            |
 
 ```bash
 # Apply only what you want
@@ -64,21 +64,27 @@ python patch_codex_vsix_rename.py --patches rename,pin-composer
 
 ---
 
+## Upgrading
+
+Re-run the script. The marketplace download always pulls the latest extension, and `--install-extension --force` replaces whatever's currently loaded.
+
 ## Rollback
 
-Uninstall the patched VSIX, reinstall the stock extension from the Marketplace.
+Uninstall the patched VSIX from the VS Code Extensions panel and reinstall the stock extension from the Marketplace.
 
 ## Compatibility
 
-The script anchors on identifiers and structural patterns in `out/extension.js`. The Codex extension ships new bundles regularly. If a patch step errors with *"could not find anchor"* the bundle has shifted — open an issue with the version and which step failed (the log next to the script points right at it).
+Anchored on identifiers and structural patterns in `out/extension.js`. The Codex extension ships new bundles regularly. If a patch step errors with *"could not find anchor"*, the bundle has shifted — open an issue with the version and which step failed (the log next to the script points right at it).
 
 ---
 
 ## Power-user usage
 
 ```bash
-# Specific marketplace item / URL / local VSIX
-python patch_codex_vsix_rename.py openai.chatgpt
+# Skip auto-install, just write the patched .vsix
+python patch_codex_vsix_rename.py --vsix-only
+
+# Patch a specific local .vsix instead of downloading
 python patch_codex_vsix_rename.py ./openai.chatgpt-X.Y.Z.vsix
 
 # Custom output path
@@ -96,6 +102,8 @@ The full feature spec sent to the Codex team lives in [CODEX_EXTENSION_FEEDBACK.
 ---
 
 ## Changelog
+
+**v0.2.0** — Default flow is now download-latest-from-Marketplace → patch → auto-install via `code --install-extension --force`. No more "I patched the wrong installed version" footgun (VS Code can have multiple versions of an extension side-by-side and only loads the highest). Pass `--vsix-only` to opt out of auto-install. The old `--install` flag is kept as a deprecated alias.
 
 **v0.1.0** — First release: right-click rename / pin / star with live refresh, expanded inline task list, workspace grouping with collapsible headers, sticky composer, `Search Chats` in profile menu, horizontal-overflow fixes.
 

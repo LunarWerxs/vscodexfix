@@ -22,7 +22,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 COMMAND_ID = "chatgpt.renameTask"
 PIN_COMMAND_ID = "chatgpt.pinTask"
@@ -689,6 +689,27 @@ def patch_extension_dir(extension_dir: Path, patches: set[str]) -> bool:
     return changed
 
 
+def _try_install_vsix(vsix_path: Path) -> bool:
+    """Install a patched VSIX via the `code` CLI. Returns True on success.
+
+    Falls back gracefully if `code` is not on PATH — the user still has the
+    .vsix on disk and can install it manually.
+    """
+    code_cli = shutil.which("code") or shutil.which("code.cmd") or shutil.which("code-insiders")
+    if code_cli is None:
+        log("`code` CLI not found on PATH; skipping auto-install.")
+        log(f"Install manually: Extensions -> ... -> Install from VSIX -> {vsix_path}")
+        return False
+    log(f"Installing patched VSIX via {code_cli}")
+    try:
+        subprocess.check_call([code_cli, "--install-extension", str(vsix_path), "--force"])
+    except subprocess.CalledProcessError as exc:
+        log(f"Auto-install failed (exit {exc.returncode}). Install manually from: {vsix_path}")
+        return False
+    log("Patched extension installed.")
+    return True
+
+
 def main() -> int:
     global LOG_PATH
     parser = argparse.ArgumentParser(description="Patch the OpenAI Codex VS Code extension.")
@@ -704,7 +725,16 @@ def main() -> int:
     parser.add_argument("--log", default="codex-vsix-patch.log", help="Patch log path. Default: codex-vsix-patch.log.")
     parser.add_argument("--skip-dependency-check", action="store_true", help="Skip scanning local Python imports.")
     parser.add_argument("--no-verify", action="store_true", help="Skip marker and JS syntax verification.")
-    parser.add_argument("--install", action="store_true", help="Install the patched VSIX with code --install-extension")
+    parser.add_argument(
+        "--vsix-only",
+        action="store_true",
+        help="Skip the auto-install step. Just write the patched .vsix to disk; you install it yourself.",
+    )
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="Deprecated; auto-install is now the default. Pass --vsix-only to skip it.",
+    )
     parser.add_argument(
         "--patches",
         default="all",
@@ -763,10 +793,11 @@ def main() -> int:
             zip_dir(root, out)
         log(f"Patched VSIX written: {out}")
         log(f"Overall status: {'updated files' if changed else 'already patched'}")
-        if args.install:
-            log("Installing patched VSIX with VS Code")
-            subprocess.check_call(["code", "--install-extension", str(out), "--force"])
-            log("Install complete")
+        if not args.vsix_only:
+            if _try_install_vsix(out):
+                log("Reload the VS Code window (Developer: Reload Window) to pick up the new bundle.")
+        else:
+            log("--vsix-only set; skipping auto-install. Install via Extensions -> ... -> Install from VSIX.")
         log("Patch run complete")
         return 0
 

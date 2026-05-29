@@ -4,7 +4,7 @@
 
 The stock ChatGPT / Codex VS Code extension buries every task behind a tiny `View all` flyout, hides recent-chat search, and won't let you rename, pin, or star anything from the sidebar. This fixes all of that — and groups your tasks by workspace while it's at it.
 
-> Current release: **v0.3.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
+> Current release: **v0.4.0** · sister project: [vsclaudefix](https://github.com/LunarWerxs/vsclaudefix) for the Anthropic Claude Code extension.
 
 ---
 
@@ -102,6 +102,8 @@ The full feature spec sent to the Codex team lives in [CODEX_EXTENSION_FEEDBACK.
 ---
 
 ## Changelog
+
+**v0.4.0** — Tracks the latest Codex bundle (26.5527.x) and hardens the patcher against the next ones. The task-row rename / pin / star context now resolves the thread id and title from stable React prop names (`conversationId`, `task`) and the row's inner title component instead of minified locals — which had started *shifting meaning* between builds (a local that was the title in one bundle became the id in the next). The profile-menu "Search Chats" injection no longer assumes a fixed menu-item count, the webview-provider and inline-task anchors key off stable structure rather than churning class strings, and the sticky composer footer — which had silently stopped applying — is fixed. Patched output is byte-for-byte deterministic across fresh runs.
 
 **v0.3.0** — Dynamic patcher refresh for newer Codex bundles. Restores task-row context injection so right-click rename / pin / star receive the actual task id again, adds cache-busting for patched webview assets, and hardens the minified-anchor matching used by the sidebar, workspace grouping, recent-search menu, and sticky composer patches.
 

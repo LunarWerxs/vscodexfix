@@ -23,7 +23,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 COMMAND_ID = "chatgpt.renameTask"
 PIN_COMMAND_ID = "chatgpt.pinTask"
@@ -309,7 +309,11 @@ def patch_extension_js(extension_js: Path) -> bool:
         raise RuntimeError("Could not find trackTabIfNeeded anchor in extension.js")
     vscode_ns = m_track.group("ns")
 
-    m_webview_provider = re.search(rf"let\s+(?P<provider>{JS_ID})=new\s+ml\(", text)
+    # The Codex webview provider is the class constructed with the extension
+    # URI as its first argument. Earlier builds named the class `ml`; the
+    # minified class name churns every release, so anchor on the stable
+    # `t.extensionUri` first constructor argument instead (unique per bundle).
+    m_webview_provider = re.search(rf"let\s+(?P<provider>{JS_ID})=new\s+{JS_ID}\(t\.extensionUri", text)
     if m_webview_provider is None:
         raise RuntimeError("Could not find Codex webview provider variable in extension.js")
     webview_provider_var = m_webview_provider.group("provider")
@@ -674,13 +678,32 @@ def _patch_vscode_post_message_bridge(assets_dir: Path) -> bool:
     return changed
 
 
+def _discover_prop_var(text: str, anchor_idx: int, prop_name: str, back: int = 40000) -> str | None:
+    """Resolve the minified local bound to a semantic React prop.
+
+    Codex task rows destructure their props at the component head, e.g.
+    ``{conversationId:n,...}=e`` (local) or ``{task:n,...}=e`` (cloud). The prop
+    *names* are stable across releases even though the minified locals (``n``
+    here) churn, so we recover the local by its prop name from the nearest
+    destructure object before the row's anchor. This keeps the patch working
+    when a new bundle renames the locals.
+    """
+    lo = max(0, anchor_idx - back)
+    pat = re.compile(rf"\{{[^{{}}]*?(?<![\w$]){re.escape(prop_name)}:(?P<v>{JS_ID})[,}}]")
+    matches = list(pat.finditer(text, lo, anchor_idx))
+    return matches[-1].group("v") if matches else None
+
+
 def _patch_task_row_data_attrs(
     task_row_text: str,
     archive_string: str,
     title_pref_vars: tuple[str, ...] = (),
     *,
     thread_id_expr: str | None = None,
+    id_prop: str | None = None,
+    id_prop_is_object: bool = False,
     title_expr_override: str | None = None,
+    discover_title_component: bool = False,
     search_back_window: int = 0,
     search_window: int = 4000,
 ) -> tuple[str, bool]:
@@ -734,8 +757,52 @@ def _patch_task_row_data_attrs(
     slot = m_slot.group("idx")
     slot_check_re = re.compile(rf"t\[{slot}\]!=={re.escape(data_var)}\|\|")
 
+    # ------------------------------------------------------------------
+    # Resolve the thread-id expression. Preferred path: discover the minified
+    # local bound to a semantic React prop (id_prop), so a future bundle that
+    # renames the local does not break us. For an object-valued prop (the cloud
+    # row's `task`), the id is `<var>.id` and the title is `<var>.title`.
+    # ------------------------------------------------------------------
+    title_from_object: str | None = None
+    if id_prop is not None:
+        prop_var = _discover_prop_var(text, anchor_idx, id_prop)
+        if prop_var is None:
+            raise RuntimeError(f"Could not find `{id_prop}` prop binding for row near {archive_string!r}")
+        id_expr = f"{prop_var}.id" if id_prop_is_object else prop_var
+        if id_prop_is_object:
+            title_from_object = f"{prop_var}.title"
+    elif thread_id_expr is not None:
+        id_expr = thread_id_expr
+    else:
+        id_expr = f"{data_var}?.codexThreadId"
+
+    # ------------------------------------------------------------------
+    # Resolve the title expression.
+    # ------------------------------------------------------------------
     if title_expr_override is not None:
         title_expr = title_expr_override
+    elif discover_title_component:
+        # The local row renders its title through an inner component:
+        #   (0,<jsx>.jsx)(<Comp>,{title:<strVar>,titleOverride:<ovrVar>})
+        # <strVar> is the resolved title string and <ovrVar> the optional
+        # rename override (used when the user has renamed the task). Both are
+        # bound near the top of the row component, well before our injection
+        # point. The minified identifiers churn every release — but this
+        # structural shape does not — so discover them rather than hard-coding.
+        # (The `title:<var>` passed to the OUTER row component is the rendered
+        # JSX element, not a string, which is why we read the inner component.)
+        title_comp_re = re.compile(
+            rf"\(0,{JS_ID}\.jsx\)\({JS_ID},\{{title:(?P<str>{JS_ID}),titleOverride:(?P<ovr>{JS_ID})\}}\)"
+        )
+        comp_lo = max(0, anchor_idx - 12000)
+        comp_matches = list(title_comp_re.finditer(text, comp_lo, anchor_idx))
+        if not comp_matches:
+            raise RuntimeError(f"Could not find inner title component for row near {archive_string!r}")
+        comp = comp_matches[-1]
+        str_var, ovr_var = comp.group("str"), comp.group("ovr")
+        title_expr = f'(typeof {ovr_var}=="string"?{ovr_var}:typeof {str_var}=="string"?{str_var}:"")'
+    elif title_from_object is not None:
+        title_expr = f'(typeof {title_from_object}=="string"?{title_from_object}:"")'
     else:
         # Build a title fallback from candidate vars if they exist near the anchor.
         available = []
@@ -747,7 +814,6 @@ def _patch_task_row_data_attrs(
             title_expr = "||".join(f'(typeof {v}=="string"?{v}:"")' for v in available) + '||""'
         else:
             title_expr = '""'
-    id_expr = thread_id_expr or f"{data_var}?.codexThreadId"
 
     rename_context_decl = (
         f'let codexRenameContext={{...{data_var},"data-vscode-context":JSON.stringify({{'
@@ -851,18 +917,23 @@ def patch_rename_webview_assets(extension_dir: Path) -> bool:
     )
     if row_asset is not None:
         text = read(row_asset)
+        # Local row: the thread id is the `conversationId` prop; the title is
+        # read from the inner title component. Both are discovered structurally
+        # (by prop name / JSX shape), so no minified locals are hard-coded.
         text, local_changed = _patch_task_row_data_attrs(
             text,
             "codex.localTaskRow.archiveTask",
-            thread_id_expr="n",
-            title_expr_override='(typeof ue=="string"?ue:typeof He=="string"?He:typeof nt=="string"?nt:"")',
+            id_prop="conversationId",
+            discover_title_component=True,
             search_window=12000,
         )
+        # Cloud row: the `task` prop is the task object, so the id and title are
+        # `<task>.id` / `<task>.title` regardless of how the local is minified.
         text, cloud_changed = _patch_task_row_data_attrs(
             text,
             "codex.cloudTaskRow.archiveTask",
-            thread_id_expr="n.id",
-            title_expr_override='(typeof F=="string"?F:typeof je=="string"?je:"")',
+            id_prop="task",
+            id_prop_is_object=True,
             search_back_window=12000,
             search_window=12000,
         )
@@ -1071,12 +1142,11 @@ def _inject_search_chats_menu_item(text: str) -> tuple[str, bool]:
         return text, False
     msg = msg_probe.group("msg")
 
-    # Locate the children array of the profile dropdown — the one within
-    # ~4KB of the keyboardShortcuts message.
-    children_re = re.compile(
-        rf"children:\[(?P<c1>{JS_ID}),(?P<c2>{JS_ID}),(?P<c3>{JS_ID}),(?P<c4>{JS_ID}),"
-        rf"(?P<c5>{JS_ID}),(?P<c6>{JS_ID}),(?P<c7>{JS_ID}),(?P<c8>{JS_ID})\]"
-    )
+    # Locate the children array of the profile dropdown — the one within ~4KB
+    # of the keyboardShortcuts message. The number of menu items changes
+    # between builds (8 in older bundles, 9+ now), so match a comma-separated
+    # list of identifiers of any length (>= 5) instead of a fixed count.
+    children_re = re.compile(rf"children:\[(?P<list>{JS_ID}(?:,{JS_ID}){{4,}})\]")
     target = None
     for m in children_re.finditer(text):
         start = max(0, m.start() - 4000)
@@ -1086,7 +1156,7 @@ def _inject_search_chats_menu_item(text: str) -> tuple[str, bool]:
     if target is None:
         return text, False
 
-    children = [target.group(f"c{i}") for i in range(1, 9)]
+    children = target.group("list").split(",")
     search_chat_jsx = (
         f"(0,{jsx_ns}.jsx)({wrap},{{extension:!0,children:(0,{jsx_ns}.jsx)({item},"
         f"{{LeftIcon:{icon},onClick:()=>{{{close_setter}(!1),window.setTimeout(()=>"
@@ -1094,7 +1164,10 @@ def _inject_search_chats_menu_item(text: str) -> tuple[str, bool]:
         f"children:(0,{jsx_ns}.jsx)({msg},{{id:`codex.profileDropdown.searchChats`,"
         f"defaultMessage:`Search Chats`,description:`Menu item to search recent Codex chats`}})}})}})"
     )
-    new_children = ",".join(children[:4] + [search_chat_jsx] + children[4:])
+    # Place Search Chats after the 4th item (the settings cluster) so it sits
+    # next to Codex Settings, clamping for shorter arrays.
+    insert_at = min(4, len(children))
+    new_children = ",".join(children[:insert_at] + [search_chat_jsx] + children[insert_at:])
     text = text[: target.start()] + f"children:[{new_children}]" + text[target.end() :]
     return text, True
 
@@ -1247,12 +1320,14 @@ def patch_workspace_groups(extension_dir: Path) -> bool:
         text = text[: m_inline.start()] + replacement + text[m_inline.end() :]
         changed = True
 
-    old_inline_group_class = (
-        "className:`group/inline -mx-[var(--padding-row-x)] flex flex-col gap-px rounded-xl pb-1 transition-colors`"
-    )
-    new_inline_group_class = "className:`group/inline -mx-[var(--padding-row-x)] max-w-full overflow-x-hidden flex flex-col gap-px rounded-xl pb-1 transition-colors`"
-    if old_inline_group_class in text:
-        text = text.replace(old_inline_group_class, new_inline_group_class, 1)
+    # Add horizontal-overflow guards to the inline task group. The trailing
+    # utility classes on this element churn between builds (newer bundles
+    # append e.g. `[--task-row-trailing-inset:...]`), so match only the stable
+    # prefix and insert the guards before `flex flex-col gap-px`. Idempotent.
+    inline_group_prefix = "group/inline -mx-[var(--padding-row-x)] flex flex-col gap-px"
+    inline_group_patched = "group/inline -mx-[var(--padding-row-x)] max-w-full overflow-x-hidden flex flex-col gap-px"
+    if inline_group_prefix in text and inline_group_patched not in text:
+        text = text.replace(inline_group_prefix, inline_group_patched, 1)
         changed = True
 
     if changed:
@@ -1319,15 +1394,17 @@ def patch_pin_composer(extension_dir: Path) -> bool:
             "Could not find new-thread-panel asset (NewThreadPanelPage + thread-footer-overlap + homePage.mainContent)"
         )
     text = read(new_thread_page)
-    new_footer_class = "sticky bottom-0 z-10 -mt-[var(--thread-footer-overlap)] flex flex-col gap-2 pb-2"
-    normalized = re.sub(
-        r"(?:sticky bottom-0 )+z-10 -mt-\[var\(--thread-footer-overlap\)\] flex flex-col gap-2 pb-2",
-        new_footer_class,
-        text,
-        count=1,
-    )
-    if normalized != text:
-        text = normalized
+    # Pin the new-chat composer footer to the bottom. The footer element is the
+    # one carrying the stable `--thread-footer-overlap` utility; we prepend
+    # `sticky bottom-0` to its class list when it isn't already present.
+    # Anchoring on the overlap token (rather than the full class string) keeps
+    # this working when the element's other utility classes change between
+    # builds, and the membership guard makes it idempotent.
+    footer_re = re.compile(r"`(?P<cls>[^`]*-mt-\[var\(--thread-footer-overlap\)\][^`]*)`")
+    m_footer = footer_re.search(text)
+    if m_footer and "sticky bottom-0" not in m_footer.group("cls"):
+        sticky_cls = "sticky bottom-0 " + m_footer.group("cls")
+        text = text[: m_footer.start("cls")] + sticky_cls + text[m_footer.end("cls") :]
         write(new_thread_page, text)
         changed = True
 
